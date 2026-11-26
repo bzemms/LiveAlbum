@@ -1,6 +1,6 @@
 import Globe from 'globe.gl';
 import './style.css';
-import { readPhoto, placeName } from './photos.js';
+import { readPhoto, placeName, searchPlaces } from './photos.js';
 import { demoAlbum } from './demo.js';
 
 const $ = (id) => document.getElementById(id);
@@ -43,8 +43,12 @@ const stopSpin = () => (globe.controls().autoRotate = false);
 $('globe').addEventListener('pointerdown', stopSpin);
 $('globe').addEventListener('wheel', stopSpin, { passive: true });
 
+// On wide screens the globe sits beside the list instead of behind it, so a place
+// the camera flies to is never hidden under the panel.
+const PANEL_SPACE = 372;
 function fit() {
-  globe.width(window.innerWidth).height(window.innerHeight);
+  const beside = window.innerWidth > 760 && !$('panel').classList.contains('collapsed');
+  globe.width(window.innerWidth - (beside ? PANEL_SPACE : 0)).height(window.innerHeight);
 }
 window.addEventListener('resize', fit);
 fit();
@@ -151,7 +155,7 @@ function renderTimeline() {
 
   const missing = state.photos.length - located.length;
   $('no-loc').hidden = !missing;
-  $('no-loc').textContent = missing ? `${missing} תמונות בלי מיקום מופיעות ברשימה אבל לא על הגלובוס. בהמשך נוכל למקם אותן ידנית.` : '';
+  $('no-loc-text').textContent = missing === 1 ? 'תמונה אחת בלי מיקום.' : `${missing} תמונות בלי מיקום.`;
   $('tour-btn').disabled = located.length === 0;
 }
 
@@ -171,6 +175,7 @@ function open(i, { fly = false } = {}) {
   $('viewer-place').textContent = p.place || (p.lat == null ? 'ללא מיקום' : p.name);
   $('viewer-date').textContent = p.date ? dateFmt.format(p.date) : '';
   $('v-count').textContent = `${i + 1} / ${state.photos.length}`;
+  $('v-locate').textContent = p.lat == null ? '📍 הוסף מיקום' : '📍 שנה מיקום';
   $('viewer').hidden = false;
   highlight();
   if (fly && p.lat != null) {
@@ -184,9 +189,106 @@ function close() {
   highlight();
 }
 $('v-close').addEventListener('click', () => { stopTour(); close(); });
+
+// ---------- Placing photos by hand ----------
+// Photos shared through chat apps lose their location. Let people search for the place
+// or click the exact spot on the globe, for one photo or every photo still missing one.
+const locator = { photo: null, results: [], searchTimer: 0 };
+const unplaced = () => state.photos.filter((p) => p.lat == null);
+
+function openLocator(photo) {
+  stopTour();
+  locator.photo = photo;
+  const missing = unplaced().filter((p) => p !== photo).length;
+  $('loc-all-row').hidden = !(photo && missing);
+  $('loc-all').checked = true;
+  $('loc-all-label').textContent = `גם ל-${missing} התמונות האחרות בלי מיקום`;
+  $('loc-title').textContent = photo ? 'איפה צולמה התמונה?' : `איפה צולמו ${unplaced().length} התמונות?`;
+  $('loc-q').value = '';
+  $('loc-results').replaceChildren();
+  $('locator').hidden = false;
+  $('viewer').hidden = true;
+  document.body.classList.add('locating');
+  $('loc-q').focus();
+}
+function closeLocator() {
+  $('locator').hidden = true;
+  document.body.classList.remove('locating');
+  locator.photo = null;
+}
+
+async function applyLocation(lat, lng, label) {
+  const targets = locator.photo
+    ? [locator.photo, ...($('loc-all').checked ? unplaced().filter((p) => p !== locator.photo) : [])]
+    : unplaced();
+  const first = targets[0];
+  closeLocator();
+  for (const p of targets) { p.lat = lat; p.lng = lng; p.place = label || null; }
+  renderTimeline();
+  refreshGlobe();
+  stopSpin();
+  globe.pointOfView({ lat, lng, altitude: 0.3 }, 1600);
+  toast(targets.length === 1 ? 'המיקום נשמר.' : `${targets.length} תמונות מוקמו.`);
+  if (first) open(state.photos.indexOf(first));
+  if (!label) {
+    const name = await placeName(lat, lng);
+    for (const p of targets) if (p.lat === lat && p.lng === lng) p.place = name;
+    renderTimeline();
+    highlight();
+    if (first && state.current === state.photos.indexOf(first)) $('viewer-place').textContent = name || first.name;
+  }
+}
+
+function renderResults(list, msg) {
+  const box = $('loc-results');
+  box.replaceChildren();
+  if (msg) {
+    const d = document.createElement('div');
+    d.className = 'loc-msg';
+    d.textContent = msg;
+    box.append(d);
+  }
+  for (const r of list) {
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.className = 'loc-result';
+    b.textContent = r.label;
+    b.addEventListener('click', () => applyLocation(r.lat, r.lng, r.label));
+    box.append(b);
+  }
+}
+
+async function runSearch() {
+  const q = $('loc-q').value.trim();
+  if (q.length < 2) return renderResults([]);
+  renderResults([], 'מחפש…');
+  try {
+    const list = await searchPlaces(q);
+    if ($('loc-q').value.trim() !== q) return;
+    renderResults(list, list.length ? '' : 'לא נמצא. נסו שם של עיר או רחוב, או לחצו על הגלובוס במקום המדויק.');
+  } catch {
+    renderResults([], 'החיפוש לא זמין כרגע. אפשר ללחוץ על הגלובוס במקום המדויק.');
+  }
+}
+$('loc-q').addEventListener('input', () => {
+  clearTimeout(locator.searchTimer);
+  locator.searchTimer = setTimeout(runSearch, 600); // the public geocoder allows about one request per second
+});
+$('loc-form').addEventListener('submit', (e) => { e.preventDefault(); clearTimeout(locator.searchTimer); runSearch(); });
+$('loc-cancel').addEventListener('click', () => {
+  const p = locator.photo;
+  closeLocator();
+  if (p) open(state.photos.indexOf(p));
+});
+$('v-locate').addEventListener('click', () => openLocator(state.photos[state.current]));
+$('no-loc-btn').addEventListener('click', () => openLocator(null));
+globe.onGlobeClick(({ lat, lng }) => {
+  if (!$('locator').hidden) applyLocation(lat, lng, null);
+});
 $('v-next').addEventListener('click', () => { stopTour(); open(Math.min(state.photos.length - 1, state.current + 1), { fly: true }); });
 $('v-prev').addEventListener('click', () => { stopTour(); open(Math.max(0, state.current - 1), { fly: true }); });
 window.addEventListener('keydown', (e) => {
+  if (!$('locator').hidden) { if (e.key === 'Escape') $('loc-cancel').click(); return; }
   if ($('viewer').hidden) return;
   if (e.key === 'Escape') { stopTour(); close(); }
   // RTL: left arrow moves forward in time.
@@ -312,8 +414,8 @@ window.addEventListener('drop', (e) => {
 });
 
 // ---------- Panel toggle ----------
-$('toggle-panel').addEventListener('click', () => { $('panel').classList.add('collapsed'); $('show-panel').hidden = false; });
-$('show-panel').addEventListener('click', () => { $('panel').classList.remove('collapsed'); $('show-panel').hidden = true; });
+$('toggle-panel').addEventListener('click', () => { $('panel').classList.add('collapsed'); $('show-panel').hidden = false; fit(); });
+$('show-panel').addEventListener('click', () => { $('panel').classList.remove('collapsed'); $('show-panel').hidden = true; fit(); });
 
 // ---------- Start ----------
 demoAlbum().then((list) => {

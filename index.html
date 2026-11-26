@@ -33,7 +33,10 @@
       </div>
 
       <ol class="timeline" id="timeline"></ol>
-      <div class="no-loc" id="no-loc" hidden></div>
+      <div class="no-loc" id="no-loc" hidden>
+        <span id="no-loc-text"></span>
+        <button class="link-btn" id="no-loc-btn" type="button">📍 מקמו אותן</button>
+      </div>
       <p class="privacy">התמונות לא עולות לשום שרת ונשארות בדפדפן שלך. כדי להציג שם של מקום, רק הקואורדינטות (בלי התמונה) נשלחות ל-OpenStreetMap.</p>
     </aside>
 
@@ -52,7 +55,19 @@
         <span id="v-count"></span>
         <button class="icon-btn" id="v-prev" aria-label="התמונה הקודמת">‹</button>
         <button class="icon-btn" id="v-close" aria-label="סגור">✕</button>
+        <button class="btn small" id="v-locate" type="button">📍 הוסף מיקום</button>
       </div>
+    </div>
+
+    <div class="locator" id="locator" hidden role="dialog" aria-labelledby="loc-title">
+      <h2 id="loc-title">איפה צולמה התמונה?</h2>
+      <form id="loc-form">
+        <input type="search" id="loc-q" placeholder="עיר, רחוב או מקום…" autocomplete="off" aria-label="חיפוש מקום" />
+      </form>
+      <div class="loc-results" id="loc-results"></div>
+      <p class="loc-hint">או לחצו על הגלובוס בדיוק במקום שבו צולמו.</p>
+      <label class="loc-all" id="loc-all-row"><input type="checkbox" id="loc-all" checked /> <span id="loc-all-label"></span></label>
+      <div class="loc-actions"><button class="btn" id="loc-cancel" type="button">ביטול</button></div>
     </div>
 
     <div class="drop" id="drop" hidden><div>שחררו כאן את התמונות</div></div>
