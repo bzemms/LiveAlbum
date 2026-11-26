@@ -148,6 +148,10 @@ body.locating #globe { cursor: crosshair; }
   .locator { margin-left: 0; width: calc(100vw - 24px); }
   body.locating .panel { transform: translateY(110%); opacity: 0; }
   .brand .tag { display: none; }
+  .privacy { display: none; }
+  .panel { gap: 10px; }
+  h1 { font-size: 1.15rem; }
+  #toggle-panel { transform: rotate(-90deg); }
   body.touring .panel { transform: translateY(110%); opacity: 0; }
   body.touring .viewer { bottom: calc(28px + env(safe-area-inset-bottom, 0px)); }
   .credit { display: none; }
