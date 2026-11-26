@@ -26,6 +26,28 @@
         <button class="icon-btn" id="toggle-panel" aria-label="הסתר רשימה" title="הסתר רשימה">‹</button>
       </div>
 
+      <div class="account" id="account">
+        <button class="btn cloud" id="signin-btn" type="button">☁️ התחברות לשמירה בענן</button>
+        <div class="account-in" id="account-in" hidden>
+          <div class="acct-row">
+            <span class="who" id="who"></span>
+            <button class="link-btn" id="signout-btn" type="button">יציאה</button>
+          </div>
+          <div class="acct-row">
+            <select id="album-select" aria-label="בחירת אלבום"></select>
+            <button class="link-btn" id="new-album-btn" type="button">＋ אלבום חדש</button>
+          </div>
+          <form class="acct-row" id="new-album-form" hidden>
+            <input type="text" id="new-album-title" placeholder="שם האלבום, למשל: האירוע במרפסה" maxlength="120" aria-label="שם האלבום החדש" />
+            <button class="btn small gold" type="submit">צור</button>
+          </form>
+          <div class="sync" id="sync" hidden>
+            <span id="sync-text"></span>
+            <button class="link-btn" id="sync-btn" type="button">שמירה בענן</button>
+          </div>
+        </div>
+      </div>
+
       <div class="actions">
         <button class="btn primary" id="tour-btn">▶ התחל מסע</button>
         <label class="btn" for="file-input">＋ הוסף תמונות וסרטונים</label>
@@ -74,6 +96,24 @@
 
     <div class="street" id="street" hidden></div>
     <div class="dive" id="dive" hidden></div>
+    <div class="modal" id="auth" hidden role="dialog" aria-modal="true" aria-labelledby="auth-title">
+      <form class="modal-card" id="auth-form">
+        <h2 id="auth-title">האלבום שלך, שמור בענן הפרטי</h2>
+        <p class="muted">נשלח אליך קישור כניסה במייל, בלי סיסמה. התמונות נשמרות רק לך ולמי שתזמינו.</p>
+        <input type="email" id="auth-email" placeholder="name@example.com" autocomplete="email" required dir="ltr" aria-label="כתובת מייל" />
+        <button class="btn primary" id="auth-send" type="submit">שלחו לי קישור כניסה</button>
+        <div class="auth-code" id="auth-code-step" hidden>
+          <p class="muted" id="auth-sent"></p>
+          <div class="acct-row">
+            <input inputmode="numeric" autocomplete="one-time-code" id="auth-code" placeholder="קוד בן 6 ספרות" maxlength="10" dir="ltr" aria-label="קוד מהמייל" />
+            <button class="btn" id="auth-verify" type="button">כניסה עם קוד</button>
+          </div>
+        </div>
+        <p class="auth-err" id="auth-err" hidden></p>
+        <button class="link-btn" id="auth-close" type="button">סגירה</button>
+      </form>
+    </div>
+
     <div class="drop" id="drop" hidden><div>שחררו כאן את התמונות</div></div>
     <div class="toast" id="toast" hidden></div>
     <div class="credit">Imagery © Esri, Maxar, Earthstar Geographics · NASA Blue Marble</div>

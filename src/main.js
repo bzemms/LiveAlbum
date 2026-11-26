@@ -2,6 +2,7 @@ import Globe from 'globe.gl';
 import './style.css';
 import { readPhoto, placeName, searchPlaces } from './photos.js';
 import { readVideo, isVideoFile } from './video.js';
+import * as cloud from './cloud.js';
 import { demoAlbum } from './demo.js';
 
 const $ = (id) => document.getElementById(id);
@@ -9,6 +10,9 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const dateFmt = new Intl.DateTimeFormat('he-IL', { day: 'numeric', month: 'long', year: 'numeric' });
 
 const state = {
+  user: null,
+  albums: [],
+  albumId: null,
   photos: [], // sorted by date
   isDemo: true,
   current: -1,
@@ -150,6 +154,12 @@ function renderTimeline() {
     list.append(li);
   });
 
+  if (!state.photos.length) {
+    const li = document.createElement('li');
+    li.className = 'empty-hint';
+    li.textContent = 'האלבום ריק. הוסיפו תמונות וסרטונים, והם יישמרו כאן בענן.';
+    list.append(li);
+  }
   const located = state.photos.filter((p) => p.lat != null);
   const places = new Set(located.map(keyOf)).size;
   const years = state.photos.filter((p) => p.date).map((p) => p.date.getFullYear());
@@ -292,6 +302,7 @@ async function applyLocation(lat, lng, label) {
   const first = targets[0];
   closeLocator();
   for (const p of targets) { p.lat = lat; p.lng = lng; p.place = label || null; }
+  saveLocations(targets, 'manual');
   renderTimeline();
   refreshGlobe();
   stopSpin();
@@ -301,6 +312,7 @@ async function applyLocation(lat, lng, label) {
   if (!label) {
     const name = await placeName(lat, lng);
     for (const p of targets) if (p.lat === lat && p.lng === lng) p.place = name;
+    saveLocations(targets.filter((p) => p.lat === lat && p.lng === lng), 'manual');
     renderTimeline();
     highlight();
     if (first && state.current === state.photos.indexOf(first)) $('viewer-place').textContent = name || first.name;
@@ -433,15 +445,17 @@ async function addFiles(files) {
   if (state.isDemo) {
     state.isDemo = false;
     state.photos = [];
-    $('album-kind').textContent = 'האלבום שלי';
-    $('album-title').textContent = 'התמונות שלי';
+    if (!state.albumId) {
+      $('album-kind').textContent = 'במכשיר הזה בלבד';
+      $('album-title').textContent = 'התמונות שלי';
+    }
   }
   const added = [];
   let failed = 0;
   for (let i = 0; i < imgs.length; i++) {
     toast(`קורא קבצים… ${i + 1} מתוך ${imgs.length}`, 0);
     const p = await (isVideoFile(imgs[i]) ? readVideo(imgs[i]) : readPhoto(imgs[i])).catch(() => null);
-    if (p) added.push(p); else failed++;
+    if (p) { added.push(p); localFiles.set(p, imgs[i]); } else failed++;
   }
   setPhotos([...state.photos, ...added]);
   overview();
@@ -456,24 +470,179 @@ async function addFiles(files) {
     ].filter(Boolean).join(' '),
     6000,
   );
+  await nameplaces(added, { quick: true });
+  if (state.albumId) await uploadAll(added);
+  else updateSync();
   nameplaces(added);
 }
 
 // Fill in place names one place at a time (the public geocoder allows about one request per second).
-async function nameplaces(list) {
+async function nameplaces(list, { quick = false } = {}) {
+  if (quick) return; // names arrive later and are saved then; uploads don't wait for them
   const seen = new Map();
   for (const p of list) {
-    if (p.lat == null) continue;
+    if (p.lat == null || p.place) continue;
     const k = keyOf(p);
     if (!seen.has(k)) {
       seen.set(k, await placeName(p.lat, p.lng));
       await sleep(1100);
     }
     p.place = seen.get(k);
+    if (p.cloudId && p.place) cloud.updateMedia(p.cloudId, { place: p.place }).catch(() => {});
     renderTimeline();
     highlight();
   }
 }
+
+// ---------- Cloud: account, albums, uploads ----------
+const localFiles = new WeakMap(); // item → the File it was read from (needed to upload it later)
+const albumKey = 'livealbum.album';
+
+function saveLocations(list, source) {
+  for (const p of list) {
+    if (!p.cloudId) continue;
+    cloud.updateMedia(p.cloudId, { lat: p.lat, lng: p.lng, place: p.place, location_source: source })
+      .catch(() => toast('המיקום לא נשמר בענן. נסו שוב.'));
+  }
+}
+
+function updateSync() {
+  const pending = state.user ? state.photos.filter((p) => !p.cloudId && localFiles.has(p)) : [];
+  $('sync').hidden = !pending.length || !state.albumId;
+  $('sync-text').textContent = pending.length === 1 ? 'פריט אחד עוד לא נשמר בענן' : `${pending.length} פריטים עוד לא נשמרו בענן`;
+}
+
+async function uploadAll(list) {
+  const items = list.filter((p) => !p.cloudId && localFiles.has(p));
+  if (!items.length || !state.albumId) return;
+  let ok = 0, lastErr = null;
+  for (let i = 0; i < items.length; i++) {
+    toast(`☁️ שומר בענן… ${i + 1} מתוך ${items.length}`, 0);
+    try {
+      items[i].cloudId = await cloud.uploadItem(state.albumId, items[i], localFiles.get(items[i]));
+      ok++;
+    } catch (e) {
+      console.warn('upload failed', e);
+      lastErr = e;
+    }
+  }
+  toast(ok === items.length ? `☁️ ${ok} פריטים נשמרו בענן.` : `נשמרו ${ok} מתוך ${items.length}. ${cloud.uploadErrorText(lastErr)}`, 6000);
+  updateSync();
+}
+$('sync-btn').addEventListener('click', () => uploadAll(state.photos));
+
+async function openAlbum(id) {
+  const album = state.albums.find((a) => a.id === id);
+  if (!album) return;
+  stopTour();
+  close();
+  state.albumId = id;
+  try { localStorage.setItem(albumKey, id); } catch { /* private mode */ }
+  $('album-select').value = id;
+  $('album-kind').textContent = album.role === 'owner' ? '☁️ האלבום שלך בענן' : '☁️ אלבום משותף';
+  $('album-title').textContent = album.title;
+  toast('טוען את האלבום…', 0);
+  try {
+    const items = await cloud.loadAlbum(id);
+    // Keep anything added on this device but not saved yet, so nothing is lost by signing in.
+    const pending = state.isDemo ? [] : state.photos.filter((p) => !p.cloudId && localFiles.has(p));
+    state.isDemo = false;
+    setPhotos([...items, ...pending]);
+    overview();
+    toast(items.length ? '' : 'האלבום ריק. הוסיפו תמונות וסרטונים.', 4000);
+    updateSync();
+    nameplaces(items);
+  } catch (e) {
+    console.warn(e);
+    toast('האלבום לא נטען. בדקו את החיבור ונסו שוב.');
+  }
+}
+
+function renderAlbums() {
+  const sel = $('album-select');
+  sel.replaceChildren(...state.albums.map((a) => {
+    const o = document.createElement('option');
+    o.value = a.id;
+    o.textContent = a.role === 'owner' ? a.title : `${a.title} (משותף)`;
+    return o;
+  }));
+  if (state.albumId) sel.value = state.albumId;
+}
+
+cloud.onUser(async (user) => {
+  if ((user?.id || null) === (state.user?.id || null)) return;
+  state.user = user;
+  $('signin-btn').hidden = !!user;
+  $('account-in').hidden = !user;
+  if (!user) return;
+  $('auth').hidden = true;
+  $('who').textContent = user.email || '';
+  try {
+    state.albums = await cloud.listAlbums();
+    if (!state.albums.length) state.albums = [await cloud.createAlbum('התמונות שלי')];
+    renderAlbums();
+    let last = null;
+    try { last = localStorage.getItem(albumKey); } catch { /* ignore */ }
+    await openAlbum(state.albums.some((a) => a.id === last) ? last : state.albums[state.albums.length - 1].id);
+  } catch (e) {
+    console.warn(e);
+    toast('לא הצלחנו לטעון את האלבומים שלך. רעננו את הדף.');
+  }
+});
+
+$('album-select').addEventListener('change', (e) => openAlbum(e.target.value));
+$('new-album-btn').addEventListener('click', () => { $('new-album-form').hidden = false; $('new-album-title').focus(); });
+$('new-album-form').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const title = $('new-album-title').value.trim();
+  if (!title) return;
+  try {
+    const a = await cloud.createAlbum(title);
+    state.albums.push(a);
+    renderAlbums();
+    $('new-album-form').hidden = true;
+    $('new-album-title').value = '';
+    await openAlbum(a.id);
+  } catch {
+    toast('האלבום לא נוצר. נסו שוב.');
+  }
+});
+$('signout-btn').addEventListener('click', async () => {
+  await cloud.signOut();
+  try { localStorage.removeItem(albumKey); } catch { /* ignore */ }
+  location.reload();
+});
+
+// Sign-in dialog: email link, or the code from the same email.
+const authErr = (msg) => { $('auth-err').textContent = msg || ''; $('auth-err').hidden = !msg; };
+$('signin-btn').addEventListener('click', () => { $('auth').hidden = false; authErr(''); $('auth-email').focus(); });
+$('auth-close').addEventListener('click', () => { $('auth').hidden = true; });
+$('auth').addEventListener('click', (e) => { if (e.target === $('auth')) $('auth').hidden = true; });
+$('auth-form').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const email = $('auth-email').value.trim();
+  if (!email) return;
+  authErr('');
+  $('auth-send').disabled = true;
+  try {
+    await cloud.sendSignInEmail(email);
+    $('auth-code-step').hidden = false;
+    $('auth-sent').textContent = `שלחנו קישור ל-${email}. פתחו אותו, או הקלידו כאן את הקוד מהמייל אם יש בו.`;
+    $('auth-send').textContent = 'שליחה חוזרת';
+  } catch (err) {
+    authErr(/rate|seconds/i.test(err?.message || '') ? 'שלחנו כבר מייל לפני רגע. חכו דקה ונסו שוב.' : 'המייל לא נשלח. בדקו את הכתובת ונסו שוב.');
+  } finally {
+    $('auth-send').disabled = false;
+  }
+});
+$('auth-verify').addEventListener('click', async () => {
+  authErr('');
+  try {
+    await cloud.verifyCode($('auth-email').value.trim(), $('auth-code').value);
+  } catch {
+    authErr('הקוד לא נכון או שפג תוקפו. בקשו מייל חדש.');
+  }
+});
 
 $('file-input').addEventListener('change', (e) => { addFiles(e.target.files); e.target.value = ''; });
 

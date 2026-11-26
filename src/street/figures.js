@@ -26,6 +26,7 @@ async function segmenter() {
 function loadImage(url) {
   return new Promise((res, rej) => {
     const img = new Image();
+    img.crossOrigin = 'anonymous'; // cloud photos come from another origin
     img.onload = () => res(img);
     img.onerror = rej;
     img.src = url;

@@ -266,3 +266,28 @@ body.in-street .panel, body.in-street .brand, body.in-street .credit, body.in-st
 .st-prompt, .st-toast, .st-radar, .st-help, .st-status, .st-joy { transition: opacity 0.6s ease; }
 .street.st-intro .st-prompt, .street.st-intro .st-toast, .street.st-intro .st-radar,
 .street.st-intro .st-help, .street.st-intro .st-status, .street.st-intro .st-joy { opacity: 0; }
+
+/* Account and cloud albums */
+.account { display: flex; flex-direction: column; gap: 8px; }
+.btn.cloud { width: 100%; background: rgba(124, 196, 255, 0.14); border-color: rgba(124, 196, 255, 0.35); }
+.account-in { display: flex; flex-direction: column; gap: 8px; background: rgba(255, 255, 255, 0.05); border-radius: 10px; padding: 10px; }
+.acct-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.who { font-size: 0.8rem; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; direction: ltr; }
+.account select, .account input[type=text], .modal input {
+  font: inherit; color: var(--ink); background: rgba(255, 255, 255, 0.08); border: 1px solid var(--glass-line);
+  border-radius: 8px; padding: 7px 10px; min-width: 0; flex: 1;
+}
+.account select option { color: #111; }
+.account select:focus-visible, .account input:focus-visible, .modal input:focus-visible { outline: 2px solid var(--gold); outline-offset: 1px; }
+.sync { display: flex; justify-content: space-between; align-items: center; gap: 8px; font-size: 0.8rem; color: var(--gold); }
+.modal { position: fixed; inset: 0; z-index: 40; display: grid; place-items: center; background: rgba(4, 8, 16, 0.6); padding: 16px; }
+.modal-card {
+  width: min(420px, 100%); background: #121b28; border: 1px solid var(--glass-line); border-radius: 16px; padding: 22px;
+  display: flex; flex-direction: column; gap: 12px; box-shadow: 0 20px 60px rgba(0, 0, 0, 0.5);
+}
+.modal-card h2 { font-family: var(--f-display); font-size: 1.25rem; margin: 0; }
+.modal-card .muted { color: var(--muted); font-size: 0.88rem; margin: 0; }
+.modal-card .btn.primary { flex: none; }
+.auth-code { display: flex; flex-direction: column; gap: 8px; }
+.auth-err { color: #ff9a8a; font-size: 0.85rem; margin: 0; }
+.timeline .empty-hint { color: var(--muted); font-size: 0.88rem; padding: 20px 6px; text-align: center; }

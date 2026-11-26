@@ -465,6 +465,7 @@ export async function enterStreet({ root, photos, place, lat, lng, onExit }) {
   function videoFor(photo) {
     if (videoShared.has(photo)) return videoShared.get(photo);
     const video = document.createElement('video');
+    video.crossOrigin = 'anonymous'; // cloud videos: keep the canvas readable for WebGL
     Object.assign(video, { muted: true, loop: true, playsInline: true, preload: 'metadata', src: photo.video });
     video.setAttribute('playsinline', '');
     video.setAttribute('muted', '');
@@ -484,6 +485,7 @@ export async function enterStreet({ root, photos, place, lat, lng, onExit }) {
     };
     // Show the poster frame until the clip plays.
     const poster = new Image();
+    poster.crossOrigin = 'anonymous';
     poster.onload = () => {
       if (!entry.aspect) setSize(poster.width, poster.height);
       if (!entry.ready) { ctx.drawImage(poster, 0, 0, canvas.width, canvas.height); tex.needsUpdate = true; }
