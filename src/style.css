@@ -288,6 +288,6 @@ body.in-street .panel, body.in-street .brand, body.in-street .credit, body.in-st
 .modal-card h2 { font-family: var(--f-display); font-size: 1.25rem; margin: 0; }
 .modal-card .muted { color: var(--muted); font-size: 0.88rem; margin: 0; }
 .modal-card .btn.primary { flex: none; }
-.auth-code { display: flex; flex-direction: column; gap: 8px; }
+.auth-sent { color: var(--gold) !important; }
 .auth-err { color: #ff9a8a; font-size: 0.85rem; margin: 0; }
 .timeline .empty-hint { color: var(--muted); font-size: 0.88rem; padding: 20px 6px; text-align: center; }

@@ -102,13 +102,7 @@
         <p class="muted">נשלח אליך קישור כניסה במייל, בלי סיסמה. התמונות נשמרות רק לך ולמי שתזמינו.</p>
         <input type="email" id="auth-email" placeholder="name@example.com" autocomplete="email" required dir="ltr" aria-label="כתובת מייל" />
         <button class="btn primary" id="auth-send" type="submit">שלחו לי קישור כניסה</button>
-        <div class="auth-code" id="auth-code-step" hidden>
-          <p class="muted" id="auth-sent"></p>
-          <div class="acct-row">
-            <input inputmode="numeric" autocomplete="one-time-code" id="auth-code" placeholder="קוד בן 6 ספרות" maxlength="10" dir="ltr" aria-label="קוד מהמייל" />
-            <button class="btn" id="auth-verify" type="button">כניסה עם קוד</button>
-          </div>
-        </div>
+        <p class="muted auth-sent" id="auth-sent" hidden></p>
         <p class="auth-err" id="auth-err" hidden></p>
         <button class="link-btn" id="auth-close" type="button">סגירה</button>
       </form>

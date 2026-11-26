@@ -20,16 +20,10 @@ export function onUser(cb) {
   sb.auth.onAuthStateChange((_event, session) => cb(session?.user ?? null));
 }
 
-/** Email a sign-in link (and a 6-digit code, if the email template includes {{ .Token }}). */
+/** Email a sign-in link. */
 export async function sendSignInEmail(email) {
   const redirect = location.origin + location.pathname;
   const { error } = await sb.auth.signInWithOtp({ email, options: { emailRedirectTo: redirect, shouldCreateUser: true } });
-  if (error) throw error;
-}
-
-/** Sign in with the code from the email (handy on phones, where the link may open another browser). */
-export async function verifyCode(email, code) {
-  const { error } = await sb.auth.verifyOtp({ email, token: code.trim(), type: 'email' });
   if (error) throw error;
 }
 

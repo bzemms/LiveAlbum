@@ -613,7 +613,7 @@ $('signout-btn').addEventListener('click', async () => {
   location.reload();
 });
 
-// Sign-in dialog: email link, or the code from the same email.
+// Sign-in dialog: a link by email, nothing else to type.
 const authErr = (msg) => { $('auth-err').textContent = msg || ''; $('auth-err').hidden = !msg; };
 $('signin-btn').addEventListener('click', () => { $('auth').hidden = false; authErr(''); $('auth-email').focus(); });
 $('auth-close').addEventListener('click', () => { $('auth').hidden = true; });
@@ -626,8 +626,8 @@ $('auth-form').addEventListener('submit', async (e) => {
   $('auth-send').disabled = true;
   try {
     await cloud.sendSignInEmail(email);
-    $('auth-code-step').hidden = false;
-    $('auth-sent').textContent = `שלחנו קישור ל-${email}. פתחו אותו, או הקלידו כאן את הקוד מהמייל אם יש בו.`;
+    $('auth-sent').hidden = false;
+    $('auth-sent').textContent = `📧 שלחנו מייל ל-${email}. לחצו על הקישור שבו, והאלבום שלכם ייפתח. כדאי לפתוח את המייל באותו מכשיר.`;
     $('auth-send').textContent = 'שליחה חוזרת';
   } catch (err) {
     authErr(/rate|seconds/i.test(err?.message || '') ? 'שלחנו כבר מייל לפני רגע. חכו דקה ונסו שוב.' : 'המייל לא נשלח. בדקו את הכתובת ונסו שוב.');
@@ -635,14 +635,7 @@ $('auth-form').addEventListener('submit', async (e) => {
     $('auth-send').disabled = false;
   }
 });
-$('auth-verify').addEventListener('click', async () => {
-  authErr('');
-  try {
-    await cloud.verifyCode($('auth-email').value.trim(), $('auth-code').value);
-  } catch {
-    authErr('הקוד לא נכון או שפג תוקפו. בקשו מייל חדש.');
-  }
-});
+
 
 $('file-input').addEventListener('change', (e) => { addFiles(e.target.files); e.target.value = ''; });
 
