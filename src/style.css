@@ -230,3 +230,10 @@ body.in-street .panel, body.in-street .brand, body.in-street .credit, body.in-st
   .st-toast { font-size: 0.9rem; white-space: normal; text-align: center; }
   .st-prompt { bottom: calc(200px + env(safe-area-inset-bottom, 0px)); }
 }
+
+.st-status {
+  position: absolute; left: 50%; top: calc(16px + env(safe-area-inset-top, 0px)); transform: translateX(-50%);
+  background: rgba(10, 14, 22, 0.8); color: #fff; font-size: 0.82rem; padding: 7px 14px; border-radius: 999px;
+  border: 1px solid rgba(255, 255, 255, 0.18); pointer-events: none; white-space: nowrap;
+}
+@media (max-width: 760px) { .st-status { top: calc(70px + env(safe-area-inset-top, 0px)); } }

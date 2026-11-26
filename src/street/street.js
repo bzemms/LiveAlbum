@@ -6,6 +6,7 @@ import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js
 import { loadArea } from './osm.js';
 import { makeGrid } from './navgrid.js';
 import { makeMinimap } from './minimap.js';
+import { peopleFrom } from './figures.js';
 
 const DAY = {
   sky: 0xa9d3f0, fog: 0xc9e2f2, ground: 0xd8d2c4, road: 0x55595f, foot: 0xc2bba9,
@@ -154,6 +155,46 @@ function photoFrame(photo, width, { posts = true, loader }) {
   return { group: g, pick: [pic, frame] };
 }
 
+// ---------- Cardboard figure of a person cut out of a photo ----------
+const shadowTex = (() => {
+  const c = document.createElement('canvas');
+  c.width = c.height = 64;
+  const g = c.getContext('2d');
+  const grd = g.createRadialGradient(32, 32, 2, 32, 32, 30);
+  grd.addColorStop(0, 'rgba(0,0,0,0.55)');
+  grd.addColorStop(1, 'rgba(0,0,0,0)');
+  g.fillStyle = grd;
+  g.fillRect(0, 0, 64, 64);
+  return new THREE.CanvasTexture(c);
+})();
+function makeStandee(fig) {
+  const g = new THREE.Group();
+  // Whole people stand on the ground at life size; people cut off by the photo's bottom edge
+  // become a bust on a post, so they keep a believable head height.
+  let h = fig.cut ? 1.05 : 1.75;
+  let w = h * fig.aspect;
+  if (w > 2.4) { w = 2.4; h = w / fig.aspect; }
+  const lift = fig.cut ? 1.85 - h : 0;
+  const tex = new THREE.CanvasTexture(fig.canvas);
+  tex.colorSpace = THREE.SRGBColorSpace;
+  tex.anisotropy = 4;
+  const card = new THREE.Mesh(new THREE.PlaneGeometry(w, h), new THREE.MeshBasicMaterial({ map: tex, alphaTest: 0.45, side: THREE.DoubleSide }));
+  card.position.y = lift + h / 2;
+  g.add(card);
+  if (fig.cut) {
+    const post = new THREE.Mesh(new THREE.BoxGeometry(0.07, lift + 0.2, 0.05), new THREE.MeshLambertMaterial({ color: 0x9c7a54 }));
+    post.position.set(0, (lift + 0.2) / 2, -0.03);
+    g.add(post);
+  }
+  const shadow = new THREE.Mesh(new THREE.PlaneGeometry(Math.max(0.9, w * 0.8), 0.7), new THREE.MeshBasicMaterial({ map: shadowTex, transparent: true, depthWrite: false }));
+  shadow.rotation.x = -Math.PI / 2;
+  shadow.position.y = 0.03;
+  g.add(shadow);
+  g.userData.grow = 0;
+  g.scale.setScalar(0.01);
+  return g;
+}
+
 // ---------- Main ----------
 export async function enterStreet({ root, photos, place, lat, lng, onExit }) {
   const night = photos.filter((p) => p.date && (p.date.getHours() >= 18 || p.date.getHours() < 6)).length > photos.length / 2;
@@ -168,6 +209,7 @@ export async function enterStreet({ root, photos, place, lat, lng, onExit }) {
     <div class="st-prompt" hidden></div>
     <div class="st-radar"><div class="st-count" hidden></div><canvas class="st-map"></canvas></div>
     <div class="st-toast" hidden></div>
+    <div class="st-status" hidden></div>
     <div class="st-help">${isTouch ? 'ג׳ויסטיק להליכה · גרירה לסיבוב המצלמה · הקשה על תמונה להגדלה' : 'WASD או חצים להליכה · Shift לריצה · גרירה לסיבוב · E או לחיצה על תמונה להגדלה'}</div>
     <div class="st-joy" ${isTouch ? '' : 'hidden'}><div class="st-knob"></div></div>
     <div class="st-photo" hidden><figure><img alt=""><figcaption><b></b><span></span></figcaption></figure><button class="st-btn" data-act="close-photo">✕ סגור</button></div>
@@ -425,7 +467,7 @@ export async function enterStreet({ root, photos, place, lat, lng, onExit }) {
     const beam = new THREE.Mesh(beamGeo, new THREE.MeshBasicMaterial({ color: 0xffd34d, transparent: true, opacity: 0.22, depthWrite: false, blending: THREE.AdditiveBlending, side: THREE.DoubleSide }));
     beam.position.set(ex, 0, ez);
     street.add(beam);
-    memories.push({ x: ex, z: ez, photo: p, found: false, beam });
+    memories.push({ x: ex, z: ez, rot, photo: p, found: false, beam });
     if (night) {
       const l = new THREE.PointLight(0xffd9a0, 6, 7, 1.6);
       l.position.set(group.position.x + out.x * 1.2, 3.4, group.position.z + out.y * 1.2);
@@ -653,6 +695,61 @@ export async function enterStreet({ root, photos, place, lat, lng, onExit }) {
     root.classList.add('st-flash');
   };
 
+  // ----- People from the photos, cut out on the device and stood up as cardboard figures -----
+  const standees = [];
+  const status = (msg) => { const el = $('.st-status'); el.textContent = msg || ''; el.hidden = !msg; };
+  const streetSpotsFor = (m) => {
+    const rot = m.rot ?? 0;
+    const fx = Math.sin(rot), fz = Math.cos(rot), tx = fz, tz = -fx;
+    const outSpots = [];
+    for (const [f, t] of [[1.6, -1.7], [1.6, 1.7], [2.6, -2.9], [2.6, 2.9], [3.4, 0.9], [3.4, -0.9], [1.0, -3.2], [1.0, 3.2]]) {
+      const x = m.x + fx * f + tx * t, z = m.z + fz * f + tz * t;
+      if (clearAt(x, z, 0.5)) outSpots.push([x, z]);
+    }
+    return outSpots;
+  };
+  const hallSpots = [];
+  // Round-robin over the tables so the figures spread through the room.
+  for (const a of [0.6, 3.8, 2.2, 5.2]) for (const [tx2, tz2] of tables) hallSpots.push([tx2 + Math.cos(a) * 2.55, tz2 + Math.sin(a) * 2.55]);
+  for (let x = -HW + 2; x <= HW - 2; x += 4.2) hallSpots.push([x, -HD + 1.6]);
+  const hallFree = hallSpots.filter(([x, z]) => !hallBlocked(x, z) && Math.hypot(x - exitPos.x, z - exitPos.z) > 2.5);
+  let hallNext = 0;
+  async function populate() {
+    const list = photos.slice(0, 12);
+    let done = 0;
+    for (const p of list) {
+      if (!running) return;
+      status(`✨ מזהה אנשים בתמונות ${done + 1}/${list.length}`);
+      let figs = [];
+      try { figs = await peopleFrom(p, 4); } catch (e) {
+        console.warn('people cut-out failed', e);
+        if (done === 0) { status(''); return; }
+      }
+      if (!running) return;
+      const m = memories.find((q) => q.photo === p);
+      const spotsS = m ? streetSpotsFor(m) : [];
+      figs.forEach((fig, i) => {
+        if (spotsS[i]) {
+          const st = makeStandee(fig);
+          st.position.set(spotsS[i][0], 0, spotsS[i][1]);
+          street.add(st);
+          standees.push(st);
+        }
+        if (hallNext < hallFree.length) {
+          const st = makeStandee(fig);
+          const [hx, hz] = hallFree[hallNext++];
+          st.position.set(hx, 0, hz);
+          hall.add(st);
+          standees.push(st);
+        }
+      });
+      done++;
+    }
+    const n = standees.length;
+    status('');
+    if (n) showToast(`👨‍👩‍👧 ${n} דמויות מהתמונות הצטרפו לאירוע`);
+  }
+
   // ----- Input -----
   const keys = new Set();
   const joy = { x: 0, y: 0, id: null };
@@ -743,6 +840,8 @@ export async function enterStreet({ root, photos, place, lat, lng, onExit }) {
   });
   $('.st-photo').addEventListener('click', (e) => { if (e.target === $('.st-photo')) closePhoto(); });
 
+  setTimeout(() => populate(), 1200);
+
   // ----- Loop -----
   const resize = () => {
     const w = root.clientWidth, h = root.clientHeight;
@@ -794,6 +893,14 @@ export async function enterStreet({ root, photos, place, lat, lng, onExit }) {
       player.rotation.y += d * Math.min(1, dt * 12);
     }
     animateCharacter(player, speed, dt);
+    for (const st of standees) {
+      if (st.parent !== scene) continue;
+      if (st.userData.grow < 1) { st.userData.grow = Math.min(1, st.userData.grow + dt * 1.8); const k = st.userData.grow; st.scale.setScalar(k < 1 ? 1 - Math.pow(1 - k, 3) * (1 - 0.01) : 1); }
+      const want = Math.atan2(camera.position.x - st.position.x, camera.position.z - st.position.z);
+      let d = want - st.rotation.y;
+      d = Math.atan2(Math.sin(d), Math.cos(d));
+      st.rotation.y += d * Math.min(1, dt * 5);
+    }
 
     // Memories: found by walking up to them; the route then leads to the next one, then the door.
     if (mode === 'street') {
@@ -906,5 +1013,5 @@ export async function enterStreet({ root, photos, place, lat, lng, onExit }) {
   camera.position.copy(player.position).add(new THREE.Vector3(Math.sin(yaw) * 7, 40, Math.cos(yaw) * 7));
   $('.st-loading').classList.add('done');
   requestAnimationFrame(step);
-  return { stop, debug: { player, camera, solids, venue, memories, get mode() { return mode; }, markerPos, door, out } };
+  return { stop, debug: { player, camera, solids, venue, memories, standees, get mode() { return mode; }, markerPos, door, out } };
 }
