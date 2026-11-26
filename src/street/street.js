@@ -121,7 +121,7 @@ function animateCharacter(ch, speed, dt) {
 }
 
 // ---------- Photo frame ----------
-function photoFrame(photo, width, { posts = true, loader }) {
+function photoFrame(photo, width, { posts = true, loader, maxH = 2.1, videoFor = null }) {
   const g = new THREE.Group();
   const frameMat = new THREE.MeshLambertMaterial({ color: 0xfbfaf6 });
   const frame = new THREE.Mesh(new THREE.BoxGeometry(width + 0.24, width * 0.75 + 0.24, 0.08), frameMat);
@@ -130,50 +130,41 @@ function photoFrame(photo, width, { posts = true, loader }) {
   pic.userData.photo = photo;
   frame.userData.photo = photo;
   g.add(frame, pic);
-  if (posts) {
-    const postMat = new THREE.MeshLambertMaterial({ color: 0x2b2f36 });
-    for (const sx of [-1, 1]) {
-      const p = new THREE.Mesh(new THREE.BoxGeometry(0.08, 1.4, 0.08), postMat);
-      p.position.set((sx * width) / 2.4, -0.7 - (width * 0.75) / 2, -0.02);
-      g.add(p);
-    }
-  }
+  const postMat = new THREE.MeshLambertMaterial({ color: 0x2b2f36 });
+  const postsM = posts ? [-1, 1].map(() => new THREE.Mesh(new THREE.BoxGeometry(0.08, 1, 0.08), postMat)) : [];
+  postsM.forEach((m) => g.add(m));
+  // Fit the picture inside width × maxH whatever its shape, so portrait phone photos and
+  // videos stay life-sized instead of towering; easels keep the picture's bottom at ~1 m.
   const fit = (tex, a) => {
-    const h = width / a;
+    let w = width, h = width / a;
+    if (h > maxH) { h = maxH; w = h * a; }
     pic.geometry.dispose();
-    pic.geometry = new THREE.PlaneGeometry(width, h);
+    pic.geometry = new THREE.PlaneGeometry(w, h);
     frame.geometry.dispose();
-    frame.geometry = new THREE.BoxGeometry(width + 0.24, h + 0.24, 0.08);
-    pic.material.map = tex;
-    pic.material.color.set(0xffffff);
-    pic.material.needsUpdate = true;
+    frame.geometry = new THREE.BoxGeometry(w + 0.24, h + 0.24, 0.08);
+    if (tex) { pic.material.map = tex; pic.material.color.set(0xffffff); pic.material.needsUpdate = true; }
+    if (posts) {
+      const bottom = 0.95;
+      g.position.y = bottom + h / 2 + 0.12;
+      postsM.forEach((m, i) => {
+        m.scale.y = bottom + 0.12;
+        m.position.set((i ? 1 : -1) * Math.min(w / 2.4, 0.9), -h / 2 - 0.12 - (bottom + 0.12) / 2, -0.02);
+      });
+    }
     g.userData.height = h;
   };
-  if (photo.video && photo.playable) {
-    // A moving picture: the video plays silently on the frame while the visitor is near.
-    const video = document.createElement('video');
-    Object.assign(video, { muted: true, loop: true, playsInline: true, preload: 'auto', src: photo.video });
-    video.setAttribute('playsinline', '');
-    const tex = new THREE.VideoTexture(video);
-    tex.colorSpace = THREE.SRGBColorSpace;
-    video.addEventListener('loadedmetadata', () => fit(tex, video.videoWidth / video.videoHeight || 16 / 9), { once: true });
-    g.userData.video = video;
+  fit(null, 4 / 3);
+  if (photo.video && photo.playable && videoFor) {
+    // A moving picture: frames are copied into a small canvas, so even a 4K phone video only
+    // uploads a few hundred pixels to the GPU per frame.
+    const v = videoFor(photo);
+    v.onSize((a) => fit(v.tex, a));
     g.traverse((o) => { if (o.isMesh) o.castShadow = true; });
-    return { group: g, pick: [pic, frame], video };
+    return { group: g, pick: [pic, frame], video: v };
   }
   loader.load(photo.full, (tex) => {
     tex.colorSpace = THREE.SRGBColorSpace;
-    const a = tex.image.width / tex.image.height || 4 / 3;
-    const h = width / a;
-    pic.geometry.dispose();
-    pic.geometry = new THREE.PlaneGeometry(width, h);
-    frame.geometry.dispose();
-    frame.geometry = new THREE.BoxGeometry(width + 0.24, h + 0.24, 0.08);
-    pic.material.map = tex;
-    pic.material.color.set(0xffffff);
-    pic.material.needsUpdate = true;
-    g.userData.height = h;
-    g.dispatchEvent({ type: 'sized', height: h });
+    fit(tex, tex.image.width / tex.image.height || 4 / 3);
   });
   g.traverse((o) => { if (o.isMesh) o.castShadow = true; });
   return { group: g, pick: [pic, frame] };
@@ -467,6 +458,48 @@ export async function enterStreet({ root, photos, place, lat, lng, onExit }) {
   // Photos in front of the venue: a short exhibition on both sides of the path to the door.
   const pickables = [];
   const videoFrames = [];
+  // One <video> per clip, shared by its street easel and its hall frame (phones limit how many
+  // videos can decode at once). It draws into a small canvas used as the texture.
+  const videoShared = new Map();
+  const isPhone = matchMedia('(pointer: coarse)').matches;
+  function videoFor(photo) {
+    if (videoShared.has(photo)) return videoShared.get(photo);
+    const video = document.createElement('video');
+    Object.assign(video, { muted: true, loop: true, playsInline: true, preload: 'metadata', src: photo.video });
+    video.setAttribute('playsinline', '');
+    video.setAttribute('muted', '');
+    const canvas = document.createElement('canvas');
+    canvas.width = 4; canvas.height = 3;
+    const ctx = canvas.getContext('2d');
+    const tex = new THREE.CanvasTexture(canvas);
+    tex.colorSpace = THREE.SRGBColorSpace;
+    const sizeFns = [];
+    const entry = { video, tex, last: 0, ready: false, onSize: (fn) => { sizeFns.push(fn); if (entry.aspect) fn(entry.aspect); } };
+    const setSize = (w, h) => {
+      const k = Math.min(1, (isPhone ? 480 : 720) / Math.max(w, h));
+      canvas.width = Math.max(2, Math.round(w * k));
+      canvas.height = Math.max(2, Math.round(h * k));
+      entry.aspect = w / h;
+      sizeFns.forEach((fn) => fn(entry.aspect));
+    };
+    // Show the poster frame until the clip plays.
+    const poster = new Image();
+    poster.onload = () => {
+      if (!entry.aspect) setSize(poster.width, poster.height);
+      if (!entry.ready) { ctx.drawImage(poster, 0, 0, canvas.width, canvas.height); tex.needsUpdate = true; }
+    };
+    poster.src = photo.full;
+    video.addEventListener('loadedmetadata', () => { if (video.videoWidth) setSize(video.videoWidth, video.videoHeight); });
+    entry.draw = (now) => {
+      if (video.paused || video.readyState < 2 || now - entry.last < (isPhone ? 40 : 30)) return;
+      entry.last = now;
+      entry.ready = true;
+      ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+      tex.needsUpdate = true;
+    };
+    videoShared.set(photo, entry);
+    return entry;
+  }
   const streetPhotos = photos.slice(0, 6);
   const tangent = new THREE.Vector2(out.y, -out.x);
   // Candidate easel spots fan out from the door; spots inside or against a building are skipped.
@@ -518,9 +551,9 @@ export async function enterStreet({ root, photos, place, lat, lng, onExit }) {
   ];
   streetPhotos.slice(0, spots.length).forEach((p, i) => {
     const { x: ex, z: ez, rot } = spots[i];
-    const { group, pick, video } = photoFrame(p, 2.3, { loader });
+    const { group, pick, video } = photoFrame(p, 2.3, { loader, videoFor });
     if (video) videoFrames.push({ video, group });
-    group.position.set(ex, 2.35, ez);
+    group.position.set(ex, group.position.y, ez);
     group.rotation.y = rot;
     street.add(group);
     pickables.push(...pick);
@@ -644,7 +677,7 @@ export async function enterStreet({ root, photos, place, lat, lng, onExit }) {
   addRow(2.05);
   if (photos.length > slots.length) addRow(4.0);
   photos.slice(0, slots.length).forEach((p, i) => {
-    const { group, pick, video } = photoFrame(p, photos.length > 14 ? 1.7 : 2.2, { posts: false, loader });
+    const { group, pick, video } = photoFrame(p, photos.length > 14 ? 1.7 : 2.2, { posts: false, loader, videoFor, maxH: photos.length > 14 ? 1.5 : 2.2 });
     if (video) videoFrames.push({ video, group });
     group.position.set(...slots[i].pos);
     group.rotation.y = slots[i].rot;
@@ -1148,11 +1181,13 @@ export async function enterStreet({ root, photos, place, lat, lng, onExit }) {
       const ranked = videoFrames
         .map((v) => { v.group.getWorldPosition(tmp); return { v, d: isIn(v.group, scene) && !viewing ? tmp.distanceTo(player.position) : Infinity }; })
         .sort((a, b) => a.d - b.d);
-      ranked.forEach(({ v, d }, i) => {
-        if (i < 3 && d < 16) { if (v.video.paused) v.video.play().catch(() => {}); }
-        else if (!v.video.paused) v.video.pause();
-      });
+      const play = new Set(ranked.filter((r) => r.d < 16).slice(0, isPhone ? 2 : 3).map((r) => r.v.video));
+      for (const e of videoShared.values()) {
+        if (play.has(e)) { if (e.video.paused) e.video.play().catch(() => {}); }
+        else if (!e.video.paused) e.video.pause();
+      }
     }
+    for (const e of videoShared.values()) e.draw(now);
     if (mode === 'photo') scene.traverse((o) => { if (o.userData.spin) o.rotation.y = Math.sin(now / 6000) * 0.05; });
     for (const st of standees) {
       if (st.userData.grow < 1) { st.userData.grow = Math.min(1, st.userData.grow + dt * 1.8); const k = st.userData.grow; st.scale.setScalar(k < 1 ? 1 - Math.pow(1 - k, 3) * (1 - 0.01) : 1); }
@@ -1273,7 +1308,7 @@ export async function enterStreet({ root, photos, place, lat, lng, onExit }) {
         mats.forEach((m) => { m.map?.dispose(); m.dispose(); });
       });
     }
-    for (const { video } of videoFrames) { video.pause(); video.removeAttribute('src'); video.load(); }
+    for (const { video } of videoShared.values()) { video.pause(); video.removeAttribute('src'); video.load(); }
     renderer.dispose();
     root.innerHTML = '';
     onExit?.();

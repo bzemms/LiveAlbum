@@ -228,7 +228,7 @@ body.in-street .panel, body.in-street .brand, body.in-street .credit, body.in-st
   .st-map { width: 120px; height: 120px; }
   .st-radar { bottom: calc(60px + env(safe-area-inset-bottom, 0px)); }
   .st-toast { font-size: 0.9rem; white-space: normal; text-align: center; }
-  .st-prompt { bottom: calc(200px + env(safe-area-inset-bottom, 0px)); }
+  .st-prompt { bottom: calc(250px + env(safe-area-inset-bottom, 0px)); max-width: calc(100vw - 32px); white-space: normal; text-align: center; }
 }
 
 .st-status {

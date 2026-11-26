@@ -53,27 +53,48 @@ function parseMeta(moov) {
   return out;
 }
 
+// A frame for the poster. iPhones don't load video data just to seek, so the clip is played
+// silently for a moment and a frame is taken once one has actually been decoded; seeking is
+// only the fallback.
 function posterOf(url) {
   return new Promise((resolve) => {
     const v = document.createElement('video');
     v.muted = true;
     v.playsInline = true;
+    v.setAttribute('playsinline', '');
+    v.setAttribute('muted', '');
     v.preload = 'auto';
     v.src = url;
     let done = false;
-    const finish = (val) => { if (!done) { done = true; v.removeAttribute('src'); v.load(); resolve(val); } };
-    const timer = setTimeout(() => finish(null), 12000);
-    v.addEventListener('loadedmetadata', () => { v.currentTime = Math.min(0.6, (v.duration || 1) / 3); });
-    v.addEventListener('seeked', () => {
+    const grab = () => {
+      if (done || !v.videoWidth) return;
+      done = true;
       clearTimeout(timer);
       const c = document.createElement('canvas');
       const s = Math.min(1, 1600 / Math.max(v.videoWidth, v.videoHeight));
       c.width = Math.max(2, Math.round(v.videoWidth * s));
       c.height = Math.max(2, Math.round(v.videoHeight * s));
       c.getContext('2d').drawImage(v, 0, 0, c.width, c.height);
-      finish({ canvas: c, duration: v.duration });
+      const duration = v.duration;
+      v.pause();
+      v.removeAttribute('src');
+      v.load();
+      resolve({ canvas: c, duration });
+    };
+    const fail = () => { if (done) return; done = true; clearTimeout(timer); v.removeAttribute('src'); v.load(); resolve(null); };
+    const timer = setTimeout(fail, 10000);
+    v.addEventListener('loadedmetadata', () => {
+      const t = Math.min(0.5, (v.duration || 1) / 4);
+      const p = v.play();
+      if (p && p.then) {
+        p.then(() => {
+          const wait = () => (v.currentTime >= t || v.ended ? grab() : (v.requestVideoFrameCallback ? v.requestVideoFrameCallback(wait) : setTimeout(wait, 50)));
+          wait();
+        }).catch(() => { v.currentTime = t; }); // autoplay refused: try seeking instead
+      } else v.currentTime = t;
     });
-    v.addEventListener('error', () => { clearTimeout(timer); finish(null); });
+    v.addEventListener('seeked', grab);
+    v.addEventListener('error', fail);
   });
 }
 
@@ -97,6 +118,11 @@ const toUrl = (canvas, max) => {
   return new Promise((r) => c.toBlob((b) => r(URL.createObjectURL(b)), 'image/jpeg', 0.86));
 };
 
+function canPlay(file) {
+  const type = file.type || (/\.mov$/i.test(file.name) ? 'video/quicktime' : 'video/mp4');
+  return document.createElement('video').canPlayType(type) !== '';
+}
+
 export const isVideoFile = (f) => f.type.startsWith('video/') || /\.(mp4|mov|m4v|webm|3gp)$/i.test(f.name);
 
 export async function readVideo(file) {
@@ -115,7 +141,8 @@ export async function readVideo(file) {
     thumb,
     full,
     video: url,
-    playable: !!poster, // false when this browser can't decode the format (e.g. HEVC outside Safari)
+    // Playable if a frame decoded, or the browser says it can play this type at all.
+    playable: !!poster || canPlay(file),
     duration: poster?.duration || null,
   };
 }
