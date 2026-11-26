@@ -45,6 +45,7 @@ h1 { font-family: var(--f-display); font-size: 1.35rem; margin: 2px 0 2px; font-
 }
 .btn:hover { background: rgba(255, 255, 255, 0.14); }
 .btn.primary { background: var(--gold); color: var(--gold-ink); border-color: transparent; flex: 1; }
+.actions .btn { white-space: nowrap; }
 .btn.primary:hover { filter: brightness(1.06); }
 .btn:disabled { opacity: 0.5; cursor: default; }
 .btn:focus-visible, .icon-btn:focus-visible, .item:focus-visible, .marker:focus-visible { outline: 2px solid var(--gold); outline-offset: 2px; }
