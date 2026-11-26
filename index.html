@@ -28,8 +28,8 @@
 
       <div class="actions">
         <button class="btn primary" id="tour-btn">▶ התחל מסע</button>
-        <label class="btn" for="file-input">＋ הוסף תמונות</label>
-        <input type="file" id="file-input" accept="image/*,.heic,.heif" multiple hidden />
+        <label class="btn" for="file-input">＋ הוסף תמונות וסרטונים</label>
+        <input type="file" id="file-input" accept="image/*,video/*,.heic,.heif,.mov,.mp4" multiple hidden />
       </div>
 
       <ol class="timeline" id="timeline"></ol>
@@ -45,6 +45,7 @@
     <div class="viewer" id="viewer" hidden>
       <figure>
         <img id="viewer-img" alt="" />
+        <video id="viewer-video" controls playsinline preload="metadata" hidden></video>
         <figcaption>
           <div class="v-place" id="viewer-place"></div>
           <div class="v-date" id="viewer-date"></div>

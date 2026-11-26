@@ -138,6 +138,29 @@ function photoFrame(photo, width, { posts = true, loader }) {
       g.add(p);
     }
   }
+  const fit = (tex, a) => {
+    const h = width / a;
+    pic.geometry.dispose();
+    pic.geometry = new THREE.PlaneGeometry(width, h);
+    frame.geometry.dispose();
+    frame.geometry = new THREE.BoxGeometry(width + 0.24, h + 0.24, 0.08);
+    pic.material.map = tex;
+    pic.material.color.set(0xffffff);
+    pic.material.needsUpdate = true;
+    g.userData.height = h;
+  };
+  if (photo.video && photo.playable) {
+    // A moving picture: the video plays silently on the frame while the visitor is near.
+    const video = document.createElement('video');
+    Object.assign(video, { muted: true, loop: true, playsInline: true, preload: 'auto', src: photo.video });
+    video.setAttribute('playsinline', '');
+    const tex = new THREE.VideoTexture(video);
+    tex.colorSpace = THREE.SRGBColorSpace;
+    video.addEventListener('loadedmetadata', () => fit(tex, video.videoWidth / video.videoHeight || 16 / 9), { once: true });
+    g.userData.video = video;
+    g.traverse((o) => { if (o.isMesh) o.castShadow = true; });
+    return { group: g, pick: [pic, frame], video };
+  }
   loader.load(photo.full, (tex) => {
     tex.colorSpace = THREE.SRGBColorSpace;
     const a = tex.image.width / tex.image.height || 4 / 3;
@@ -213,7 +236,7 @@ export async function enterStreet({ root, photos, place, lat, lng, onExit }) {
     <div class="st-status" hidden></div>
     <div class="st-help">${isTouch ? 'ג׳ויסטיק להליכה · גרירה לסיבוב המצלמה · הקשה על תמונה להגדלה' : 'WASD או חצים להליכה · Shift לריצה · גרירה לסיבוב · E או לחיצה על תמונה להגדלה'}</div>
     <div class="st-joy" ${isTouch ? '' : 'hidden'}><div class="st-knob"></div></div>
-    <div class="st-photo" hidden><figure><img alt=""><figcaption><b></b><span></span></figcaption></figure><div class="st-photo-actions"><button class="st-btn gold" data-act="enter-photo">🔮 היכנסו לתמונה</button><button class="st-btn" data-act="close-photo">✕ סגור</button></div></div>
+    <div class="st-photo" hidden><figure><img alt=""><video controls playsinline hidden></video><figcaption><b></b><span></span></figcaption></figure><div class="st-photo-actions"><button class="st-btn gold" data-act="enter-photo">🔮 היכנסו לתמונה</button><button class="st-btn" data-act="close-photo">✕ סגור</button></div></div>
     <div class="st-loading"><div class="st-spinner"></div><div>יורדים לרחוב…</div></div>`;
   const $ = (s) => root.querySelector(s);
   $('.st-place b').textContent = place || 'המקום';
@@ -409,6 +432,7 @@ export async function enterStreet({ root, photos, place, lat, lng, onExit }) {
 
   // Photos in front of the venue: a short exhibition on both sides of the path to the door.
   const pickables = [];
+  const videoFrames = [];
   const streetPhotos = photos.slice(0, 6);
   const tangent = new THREE.Vector2(out.y, -out.x);
   // Candidate easel spots fan out from the door; spots inside or against a building are skipped.
@@ -460,7 +484,8 @@ export async function enterStreet({ root, photos, place, lat, lng, onExit }) {
   ];
   streetPhotos.slice(0, spots.length).forEach((p, i) => {
     const { x: ex, z: ez, rot } = spots[i];
-    const { group, pick } = photoFrame(p, 2.3, { loader });
+    const { group, pick, video } = photoFrame(p, 2.3, { loader });
+    if (video) videoFrames.push({ video, group });
     group.position.set(ex, 2.35, ez);
     group.rotation.y = rot;
     street.add(group);
@@ -586,7 +611,8 @@ export async function enterStreet({ root, photos, place, lat, lng, onExit }) {
   addRow(2.05);
   if (photos.length > slots.length) addRow(4.0);
   photos.slice(0, slots.length).forEach((p, i) => {
-    const { group, pick } = photoFrame(p, photos.length > 14 ? 1.7 : 2.2, { posts: false, loader });
+    const { group, pick, video } = photoFrame(p, photos.length > 14 ? 1.7 : 2.2, { posts: false, loader });
+    if (video) videoFrames.push({ video, group });
     group.position.set(...slots[i].pos);
     group.rotation.y = slots[i].rot;
     hall.add(group);
@@ -829,12 +855,24 @@ export async function enterStreet({ root, photos, place, lat, lng, onExit }) {
     const m = memories.find((q) => q.photo === p);
     if (m && mode === 'street') markFound(m);
     viewing = p;
+    const ov = $('.st-photo video');
+    if (p.video && p.playable) {
+      $('.st-photo img').hidden = true;
+      ov.hidden = false;
+      ov.src = p.video;
+      ov.poster = p.full;
+      ov.play().catch(() => {});
+    } else {
+      ov.pause();
+      ov.hidden = true;
+      $('.st-photo img').hidden = false;
+    }
     $('.st-photo img').src = p.full;
     $('.st-photo b').textContent = p.place || place || '';
     $('.st-photo span').textContent = p.date ? dateFmt.format(p.date) : '';
     $('.st-photo').hidden = false;
   }
-  function closePhoto() { viewing = null; $('.st-photo').hidden = true; }
+  function closePhoto() { viewing = null; $('.st-photo video').pause(); $('.st-photo').hidden = true; }
 
   // ----- Inside a photo: the picture becomes a relief you can walk around (AI depth) -----
   const dio = { scene: null, photo: null, depth: 2, w: 8, back: null, busy: false };
@@ -1002,6 +1040,17 @@ export async function enterStreet({ root, photos, place, lat, lng, onExit }) {
       player.rotation.y += d * Math.min(1, dt * 12);
     }
     animateCharacter(player, speed, dt);
+    // Play the three nearest video frames in view range; pause the rest to spare the device.
+    if (videoFrames.length && now - (step.vidAt || 0) > 500) {
+      step.vidAt = now;
+      const ranked = videoFrames
+        .map((v) => { v.group.getWorldPosition(tmp); return { v, d: isIn(v.group, scene) && !viewing ? tmp.distanceTo(player.position) : Infinity }; })
+        .sort((a, b) => a.d - b.d);
+      ranked.forEach(({ v, d }, i) => {
+        if (i < 3 && d < 16) { if (v.video.paused) v.video.play().catch(() => {}); }
+        else if (!v.video.paused) v.video.pause();
+      });
+    }
     if (mode === 'photo') scene.traverse((o) => { if (o.userData.spin) o.rotation.y = Math.sin(now / 6000) * 0.05; });
     for (const st of standees) {
       if (st.parent !== scene) continue;
@@ -1115,6 +1164,7 @@ export async function enterStreet({ root, photos, place, lat, lng, onExit }) {
         mats.forEach((m) => { m.map?.dispose(); m.dispose(); });
       });
     }
+    for (const { video } of videoFrames) { video.pause(); video.removeAttribute('src'); video.load(); }
     renderer.dispose();
     root.innerHTML = '';
     onExit?.();
@@ -1123,5 +1173,5 @@ export async function enterStreet({ root, photos, place, lat, lng, onExit }) {
   camera.position.copy(player.position).add(new THREE.Vector3(Math.sin(yaw) * 7, 40, Math.cos(yaw) * 7));
   $('.st-loading').classList.add('done');
   requestAnimationFrame(step);
-  return { stop, debug: { player, camera, solids, venue, memories, standees, get mode() { return mode; }, markerPos, door, out } };
+  return { stop, debug: { player, camera, solids, venue, memories, standees, videoFrames, get mode() { return mode; }, markerPos, door, out } };
 }

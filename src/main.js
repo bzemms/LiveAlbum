@@ -1,6 +1,7 @@
 import Globe from 'globe.gl';
 import './style.css';
 import { readPhoto, placeName, searchPlaces } from './photos.js';
+import { readVideo, isVideoFile } from './video.js';
 import { demoAlbum } from './demo.js';
 
 const $ = (id) => document.getElementById(id);
@@ -68,6 +69,7 @@ function markerFor(group) {
   img.src = group.photos[0].thumb;
   img.alt = '';
   el.append(img);
+  if (group.photos.some((p) => p.video)) { const v = document.createElement('span'); v.className = 'vid-dot'; v.textContent = '▶'; el.append(v); }
   if (group.photos.length > 1) {
     const n = document.createElement('span');
     n.className = 'count';
@@ -142,6 +144,7 @@ function renderTimeline() {
     d.textContent = p.date ? dateFmt.format(p.date) : '';
     t.append(name, d);
     b.append(img, t);
+    if (p.video) { const badge = document.createElement('span'); badge.className = 'vid-badge'; badge.textContent = '▶'; b.append(badge); }
     b.addEventListener('click', () => { stopTour(); open(i, { fly: true }); });
     li.append(b);
     list.append(li);
@@ -170,8 +173,20 @@ function open(i, { fly = false } = {}) {
   const p = state.photos[i];
   if (!p) return;
   state.current = i;
-  $('viewer-img').src = p.full;
-  $('viewer-img').alt = p.place || p.name;
+  const vid = $('viewer-video');
+  if (p.video && p.playable) {
+    $('viewer-img').hidden = true;
+    vid.hidden = false;
+    if (vid.dataset.src !== p.video) { vid.src = p.video; vid.dataset.src = p.video; vid.poster = p.full; }
+    vid.muted = !!state.touring; // the journey plays videos silently; opening one yourself plays with sound
+    vid.play().catch(() => {});
+  } else {
+    vid.pause();
+    vid.hidden = true;
+    $('viewer-img').hidden = false;
+    $('viewer-img').src = p.full;
+    $('viewer-img').alt = p.place || p.name;
+  }
   $('viewer-place').textContent = p.place || (p.lat == null ? 'ללא מיקום' : p.name);
   $('viewer-date').textContent = p.date ? dateFmt.format(p.date) : '';
   $('v-count').textContent = `${i + 1} / ${state.photos.length}`;
@@ -185,6 +200,7 @@ function open(i, { fly = false } = {}) {
   }
 }
 function close() {
+  $('viewer-video').pause();
   $('viewer').hidden = true;
   state.current = -1;
   highlight();
@@ -369,7 +385,8 @@ async function tour() {
     }
     if (run.cancelled) break;
     open(i);
-    await sleep(2800);
+    // Videos get time to play (up to 8 s); photos a few seconds each.
+    await sleep(p.video && p.playable ? Math.min(8000, Math.max(2800, (p.duration || 3) * 1000)) : 2800);
   }
   if (!run.cancelled) {
     close();
@@ -403,8 +420,8 @@ function setPhotos(list) {
 }
 
 async function addFiles(files) {
-  const imgs = [...files].filter((f) => f.type.startsWith('image/') || /\.(heic|heif)$/i.test(f.name));
-  if (!imgs.length) return toast('לא נמצאו קבצי תמונה.');
+  const imgs = [...files].filter((f) => f.type.startsWith('image/') || /\.(heic|heif)$/i.test(f.name) || isVideoFile(f));
+  if (!imgs.length) return toast('לא נמצאו תמונות או סרטונים.');
   stopTour();
   close();
   if (state.isDemo) {
@@ -416,15 +433,21 @@ async function addFiles(files) {
   const added = [];
   let failed = 0;
   for (let i = 0; i < imgs.length; i++) {
-    toast(`קורא תמונות… ${i + 1} מתוך ${imgs.length}`, 0);
-    const p = await readPhoto(imgs[i]).catch(() => null);
+    toast(`קורא קבצים… ${i + 1} מתוך ${imgs.length}`, 0);
+    const p = await (isVideoFile(imgs[i]) ? readVideo(imgs[i]) : readPhoto(imgs[i])).catch(() => null);
     if (p) added.push(p); else failed++;
   }
   setPhotos([...state.photos, ...added]);
   overview();
   const located = added.filter((p) => p.lat != null).length;
+  const vids = added.filter((p) => p.video).length;
+  const unplayable = added.filter((p) => p.video && !p.playable).length;
   toast(
-    [`נוספו ${added.length} תמונות, ${located} מהן עם מיקום.`, failed ? `${failed} קבצים לא נקראו.` : ''].filter(Boolean).join(' '),
+    [
+      `נוספו ${added.length} קבצים${vids ? ` (${vids} סרטונים)` : ''}, ${located} מהם עם מיקום.`,
+      failed ? `${failed} קבצים לא נקראו.` : '',
+      unplayable ? `${unplayable} סרטונים בפורמט שהדפדפן הזה לא מנגן (נסו ב-Safari או ייצאו כ-MP4).` : '',
+    ].filter(Boolean).join(' '),
     6000,
   );
   nameplaces(added);

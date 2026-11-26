@@ -241,3 +241,11 @@ body.in-street .panel, body.in-street .brand, body.in-street .credit, body.in-st
 .st-actions { display: flex; gap: 8px; flex-wrap: wrap; }
 .st-btn.gold { background: var(--gold); color: var(--gold-ink); border-color: transparent; }
 .st-photo-actions { display: flex; gap: 10px; }
+
+/* Videos */
+.viewer video { width: 100%; max-height: 46vh; display: block; border-radius: 2px; background: #000; }
+.item { position: relative; }
+.vid-badge { position: absolute; right: 22px; top: 22px; width: 20px; height: 20px; border-radius: 50%; background: rgba(0, 0, 0, 0.65); color: #fff; font-size: 0.6rem; display: grid; place-items: center; pointer-events: none; }
+.vid-dot { position: absolute; bottom: -6px; left: -8px; width: 20px; height: 20px; border-radius: 50%; background: #e2445c; color: #fff; font-size: 0.6rem; display: grid; place-items: center; }
+.st-photo video { display: block; max-width: 100%; max-height: 72vh; background: #000; }
+@media (max-width: 760px) { .viewer video { max-height: 30vh; } }
