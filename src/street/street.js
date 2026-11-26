@@ -234,6 +234,7 @@ export async function enterStreet({ root, photos, place, lat, lng, onExit }) {
     <div class="st-radar"><div class="st-count" hidden></div><canvas class="st-map"></canvas></div>
     <div class="st-toast" hidden></div>
     <div class="st-status" hidden></div>
+    <div class="st-title"><b></b><span></span></div>
     <div class="st-help">${isTouch ? 'ג׳ויסטיק להליכה · גרירה לסיבוב המצלמה · הקשה על תמונה להגדלה' : 'WASD או חצים להליכה · Shift לריצה · גרירה לסיבוב · E או לחיצה על תמונה להגדלה'}</div>
     <div class="st-joy" ${isTouch ? '' : 'hidden'}><div class="st-knob"></div></div>
     <div class="st-photo" hidden><figure><img alt=""><video controls playsinline hidden></video><figcaption><b></b><span></span></figcaption></figure><div class="st-photo-actions"><button class="st-btn gold" data-act="enter-photo">🔮 היכנסו לתמונה</button><button class="st-btn" data-act="close-photo">✕ סגור</button></div></div>
@@ -242,7 +243,8 @@ export async function enterStreet({ root, photos, place, lat, lng, onExit }) {
   $('.st-place b').textContent = place || 'המקום';
 
   const renderer = new THREE.WebGLRenderer({ canvas: $('.st-canvas'), antialias: true });
-  renderer.setPixelRatio(Math.min(devicePixelRatio, isTouch ? 1.75 : 2));
+  const maxPR = Math.min(devicePixelRatio, isTouch ? 1.75 : 2);
+  renderer.setPixelRatio(maxPR);
   renderer.toneMapping = THREE.ACESFilmicToneMapping;
   renderer.shadowMap.enabled = !isTouch;
   renderer.shadowMap.type = THREE.PCFSoftShadowMap;
@@ -352,6 +354,38 @@ export async function enterStreet({ root, photos, place, lat, lng, onExit }) {
     solids.push(venue);
   }
 
+  // Spatial index of building footprints (16 m cells), so collision and camera checks only look
+  // at the few buildings nearby instead of every building in the neighbourhood.
+  const CELL = 16;
+  const cells = new Map();
+  solids.forEach((b, i) => {
+    b.stamp = 0;
+    for (let cx = Math.floor(b.box[0] / CELL); cx <= Math.floor(b.box[2] / CELL); cx++) {
+      for (let cz = Math.floor(b.box[1] / CELL); cz <= Math.floor(b.box[3] / CELL); cz++) {
+        const k = cx * 100003 + cz;
+        if (!cells.has(k)) cells.set(k, []);
+        cells.get(k).push(b);
+      }
+    }
+  });
+  let stampNow = 0;
+  const nearbyHit = (x, z, r, test) => {
+    stampNow++;
+    for (let cx = Math.floor((x - r) / CELL); cx <= Math.floor((x + r) / CELL); cx++) {
+      for (let cz = Math.floor((z - r) / CELL); cz <= Math.floor((z + r) / CELL); cz++) {
+        const list = cells.get(cx * 100003 + cz);
+        if (!list) continue;
+        for (const b of list) {
+          if (b.stamp === stampNow) continue;
+          b.stamp = stampNow;
+          if (x > b.box[0] - r && x < b.box[2] + r && z > b.box[1] - r && z < b.box[3] + r && test(b)) return true;
+        }
+      }
+    }
+    return false;
+  };
+  const solidNear = (x, z, r) => nearbyHit(x, z, r, (b) => inPoly(x, z, b.pts) || (r > 0 && closestOnPoly(x, z, b.pts).d < r));
+
   // A named place inside the venue (from the map's points of interest) names the venue.
   if (!venue.name) venue.name = (area.pois || []).find((p) => inPoly(p.x, p.z, venue.pts))?.name || null;
 
@@ -441,13 +475,13 @@ export async function enterStreet({ root, photos, place, lat, lng, onExit }) {
     for (const side of [1, -1]) {
       const along = side * (2.9 + k * 3.1), dist = 4.2 + k * 1.2;
       const x = door.x + out.x * dist + tangent.x * along, z = door.z + out.y * dist + tangent.y * along;
-      const clear = !solids.some((b) => x > b.box[0] - 2 && x < b.box[2] + 2 && z > b.box[1] - 2 && z < b.box[3] + 2 && (inPoly(x, z, b.pts) || closestOnPoly(x, z, b.pts).d < 1.4));
+      const clear = !solidNear(x, z, 1.4);
       if (clear) easelSpots.push({ x, z, side });
     }
   }
   // A game of finding memories: a couple of photos wait at the door, the rest are scattered
   // along nearby streets, each marked by a beam of light you can see over the roofs.
-  const clearAt = (x, z, r) => !solids.some((b) => x > b.box[0] - r && x < b.box[2] + r && z > b.box[1] - r && z < b.box[3] + r && (inPoly(x, z, b.pts) || closestOnPoly(x, z, b.pts).d < r));
+  const clearAt = (x, z, r) => !solidNear(x, z, r);
   const nearCount = Math.min(easelSpots.length, streetPhotos.length <= 3 ? 1 : 2);
   const roadSpots = [];
   for (const r of area.roads) {
@@ -508,7 +542,7 @@ export async function enterStreet({ root, photos, place, lat, lng, onExit }) {
 
   // Trees along the bigger roads, and lamp posts at night.
   const treeSpots = [], lampSpots = [];
-  const blocked = (x, z) => solids.some((b) => x > b.box[0] - 1 && x < b.box[2] + 1 && z > b.box[1] - 1 && z < b.box[3] + 1 && inPoly(x, z, b.pts));
+  const blocked = (x, z) => nearbyHit(x, z, 1, (b) => inPoly(x, z, b.pts));
   for (const r of area.roads) {
     if (r.foot) continue;
     for (let i = 0; i < r.pts.length - 1; i++) {
@@ -544,8 +578,7 @@ export async function enterStreet({ root, photos, place, lat, lng, onExit }) {
 
   // Collision: building footprints (2D) with a small body radius.
   const BODY = 0.35;
-  const blockedAt = (x, z) => solids.some((b) => x > b.box[0] - BODY && x < b.box[2] + BODY && z > b.box[1] - BODY && z < b.box[3] + BODY &&
-    (inPoly(x, z, b.pts) || closestOnPoly(x, z, b.pts).d < BODY));
+  const blockedAt = (x, z) => solidNear(x, z, BODY);
 
   // ----- Hall scene -----
   const hall = new THREE.Scene();
@@ -649,7 +682,7 @@ export async function enterStreet({ root, photos, place, lat, lng, onExit }) {
   let scene = street;
   // Start a short walk from the door, on open ground: straight out if possible, else a bit to the side.
   // Start on the street in front of the venue, with room around the visitor.
-  const roomy = (x, z, r) => !solids.some((b) => x > b.box[0] - r && x < b.box[2] + r && z > b.box[1] - r && z < b.box[3] + r && (inPoly(x, z, b.pts) || closestOnPoly(x, z, b.pts).d < r));
+  const roomy = (x, z, r) => !solidNear(x, z, r);
   const spawnStreet = () => {
     const tries = [];
     if (road) for (const s2 of [0, 6, -6, 12, -12]) tries.push([road.x + road.dir.x * s2, road.z + road.dir.y * s2]);
@@ -694,6 +727,21 @@ export async function enterStreet({ root, photos, place, lat, lng, onExit }) {
   let camDist = 7;
   let cooldown = 1.5;
 
+  // Soft fade through dark: run `fn` while the screen is covered, then reveal.
+  let fading = false;
+  const fadeSwap = (fn) => {
+    if (fading) return;
+    fading = true;
+    cooldown = 9;
+    root.classList.add('st-fade');
+    setTimeout(() => {
+      fn();
+      cooldown = 1.2;
+      camera.position.copy(followPos());
+      lookAt.copy(player.position).y += 1.6;
+      requestAnimationFrame(() => { root.classList.remove('st-fade'); fading = false; });
+    }, 320);
+  };
   const goHall = () => {
     mode = 'hall';
     $('.st-radar').hidden = true;
@@ -702,8 +750,6 @@ export async function enterStreet({ root, photos, place, lat, lng, onExit }) {
     player.position.set(0, 0, HD - 4.5);
     player.rotation.y = Math.PI;
     yaw = 0;
-    cooldown = 1.2;
-    flash();
   };
   const goStreet = () => {
     mode = 'street';
@@ -713,13 +759,6 @@ export async function enterStreet({ root, photos, place, lat, lng, onExit }) {
     player.position.copy(door).add(new THREE.Vector3(out.x * 4, 0, out.y * 4));
     player.rotation.y = facing;
     yaw = facing + Math.PI;
-    cooldown = 1.2;
-    flash();
-  };
-  const flash = () => {
-    root.classList.remove('st-flash');
-    void root.offsetWidth;
-    root.classList.add('st-flash');
   };
 
   // ----- People from the photos, cut out on the device and stood up as cardboard figures -----
@@ -782,6 +821,7 @@ export async function enterStreet({ root, photos, place, lat, lng, onExit }) {
   const joy = { x: 0, y: 0, id: null };
   const onKey = (e) => {
     if (e.type === 'keydown') {
+      skipIntro();
       if (e.code === 'Escape') { if (!$('.st-photo').hidden) closePhoto(); else if (mode === 'photo') leavePhoto(); return; }
       if (e.code === 'KeyE' && near) { openPhoto(near); return; }
       if (e.code === 'KeyQ' && near && mode !== 'photo') { enterPhoto(near); return; }
@@ -794,6 +834,7 @@ export async function enterStreet({ root, photos, place, lat, lng, onExit }) {
   const canvas = $('.st-canvas');
   let drag = null;
   canvas.addEventListener('pointerdown', (e) => {
+    skipIntro();
     drag = { id: e.pointerId, x: e.clientX, y: e.clientY, sx: e.clientX, sy: e.clientY };
     canvas.setPointerCapture(e.pointerId);
   });
@@ -941,20 +982,22 @@ export async function enterStreet({ root, photos, place, lat, lng, onExit }) {
       if (!running) return;
       if (dio.scene && dio.photo !== p) dio.scene.traverse((o) => { o.geometry?.dispose(); o.material?.map?.dispose?.(); o.material?.dispose?.(); });
       if (dio.photo !== p) { dio.scene = buildDiorama(depth, tex); dio.photo = p; }
-      dio.back = { mode, scene, pos: player.position.clone(), rot: player.rotation.y, yaw };
-      mode = 'photo';
-      scene = dio.scene;
-      scene.add(player);
-      player.position.set(0, 0, dio.depth + 3.2);
-      player.rotation.y = Math.PI;
-      yaw = 0;
-      pitch = 0.12;
-      $('.st-radar').hidden = true;
-      $('[data-act="leave-photo"]').hidden = false;
-      $('[data-act="exit"]').hidden = true;
       status('');
-      showToast('🔮 אתם בתוך התמונה. הסתובבו כדי לראות את העומק');
-      flash();
+      fadeSwap(() => {
+        dio.back = { mode, scene, pos: player.position.clone(), rot: player.rotation.y, yaw, pitch };
+        mode = 'photo';
+        scene = dio.scene;
+        scene.add(player);
+        player.position.set(0, 0, dio.depth + 3.2);
+        player.rotation.y = Math.PI;
+        yaw = 0;
+        pitch = 0.12;
+        vel.set(0, 0);
+        $('.st-radar').hidden = true;
+        $('[data-act="leave-photo"]').hidden = false;
+        $('[data-act="exit"]').hidden = true;
+        showToast('🔮 אתם בתוך התמונה. הסתובבו כדי לראות את העומק');
+      });
     } catch (e) {
       console.warn('depth failed', e);
       status('');
@@ -966,17 +1009,19 @@ export async function enterStreet({ root, photos, place, lat, lng, onExit }) {
   function leavePhoto() {
     if (mode !== 'photo' || !dio.back) return;
     const b = dio.back;
-    mode = b.mode;
-    scene = b.scene;
-    scene.add(player);
-    player.position.copy(b.pos);
-    player.rotation.y = b.rot;
-    yaw = b.yaw;
-    $('.st-radar').hidden = mode !== 'street';
-    $('[data-act="leave-photo"]').hidden = true;
-    $('[data-act="exit"]').hidden = false;
-    cooldown = 1;
-    flash();
+    fadeSwap(() => {
+      mode = b.mode;
+      scene = b.scene;
+      scene.add(player);
+      player.position.copy(b.pos);
+      player.rotation.y = b.rot;
+      yaw = b.yaw;
+      pitch = b.pitch;
+      vel.set(0, 0);
+      $('.st-radar').hidden = mode !== 'street';
+      $('[data-act="leave-photo"]').hidden = true;
+      $('[data-act="exit"]').hidden = false;
+    });
   }
   root.addEventListener('click', (e) => {
     const act = e.target.closest('[data-act]')?.dataset.act;
@@ -1004,11 +1049,53 @@ export async function enterStreet({ root, photos, place, lat, lng, onExit }) {
   let last = performance.now();
   const camPos = new THREE.Vector3();
   const tmp = new THREE.Vector3();
-  const pickFrames = () => pickables.filter((m) => m.geometry.type === 'PlaneGeometry' && isIn(m, scene));
+  const tmp2 = new THREE.Vector3();
+  const orbit = new THREE.Vector3();
+  const INTRO_S = 3.2;
+  let intro = 0;
+  const introAng0 = Math.atan2(out.x, out.y);
+  let introSpeed = 1;
+  const skipIntro = () => { if (intro > 0 && intro < 1) introSpeed = 3.5; }; // speed up, don't cut
+  // Frame positions per scene, worked out once (frames never move).
+  const frameCache = new Map();
+  const pickFrames = () => {
+    let c = frameCache.get(scene);
+    if (!c || c.n !== pickables.length) {
+      const list = pickables.filter((m) => m.geometry.type === 'PlaneGeometry' && isIn(m, scene)).map((m) => { m.getWorldPosition(tmp); return { x: tmp.x, z: tmp.z, photo: m.userData.photo }; });
+      c = { n: pickables.length, list };
+      frameCache.set(scene, c);
+    }
+    return c.list;
+  };
+  const vel = new THREE.Vector2();
+  const lookAt = new THREE.Vector3();
+  const head = new THREE.Vector3();
+  const dir = new THREE.Vector3();
+  let camPitchUsed = 0.32, camDistUsed = 7;
+  // Where the follow camera wants to be right now (also used to place it instantly after a fade).
+  function followPos() {
+    head.copy(player.position).y += 1.6;
+    const camBad = (p) => mode === 'photo' ? p.y < 0.3 || p.z < dio.depth + 0.4 : mode === 'street'
+      ? nearbyHit(p.x, p.z, 0.3, (b) => p.y < b.h + 0.6 && (inPoly(p.x, p.z, b.pts) || closestOnPoly(p.x, p.z, b.pts).d < 0.3))
+      : Math.abs(p.x) > HW - 0.3 || Math.abs(p.z) > HD - 0.3 || p.y > HH - 0.3;
+    const clearPath = (d) => { for (let t = 0.35; t <= 1.001; t += 0.13) { tmp.copy(head).addScaledVector(dir, d * t); if (camBad(tmp)) return false; } return true; };
+    // In narrow streets, rise above the roofs before pulling in close (as street games do).
+    for (let pt = pitch; pt <= 1.45; pt += 0.15) {
+      dir.set(Math.sin(yaw) * Math.cos(pt), Math.sin(pt), Math.cos(yaw) * Math.cos(pt));
+      const far = mode === 'street' && pt > 0.85 ? Math.max(camDist, 18) : camDist;
+      for (let d = far; d >= Math.min(camDist, 3); d -= 1) if (clearPath(d)) { camPitchUsed = pt; camDistUsed = d; return new THREE.Vector3().copy(head).addScaledVector(dir, d); }
+    }
+    dir.set(Math.sin(yaw) * Math.cos(pitch), Math.sin(pitch), Math.cos(yaw) * Math.cos(pitch));
+    let d = camDist;
+    while (d > 1.2 && !clearPath(d)) d -= 0.4;
+    camPitchUsed = pitch; camDistUsed = d;
+    return new THREE.Vector3().copy(head).addScaledVector(dir, d);
+  }
 
   function step(now) {
     if (!running) return;
     requestAnimationFrame(step);
+    const t0 = performance.now();
     const dt = Math.min(0.05, (now - last) / 1000);
     last = now;
     cooldown = Math.max(0, cooldown - dt);
@@ -1020,25 +1107,39 @@ export async function enterStreet({ root, photos, place, lat, lng, onExit }) {
       if (keys.has('KeyS') || keys.has('ArrowDown')) iz += 1;
       if (keys.has('KeyA') || keys.has('ArrowLeft')) ix -= 1;
       if (keys.has('KeyD') || keys.has('ArrowRight')) ix += 1;
-      ix += joy.x; iz += joy.y;
+      // Joystick: ignore the first 12% of travel, then a soft curve for fine control.
+      const jm = Math.hypot(joy.x, joy.y);
+      if (jm > 0.12) { const k = Math.pow((jm - 0.12) / 0.88, 1.3) / jm; ix += joy.x * k; iz += joy.y * k; }
     }
+    if (intro < 1 || fading) ix = iz = 0;
     const mag = Math.min(1, Math.hypot(ix, iz));
     const run = keys.has('ShiftLeft') || keys.has('ShiftRight') || Math.hypot(joy.x, joy.y) > 0.92;
-    const speed = mag * (run ? 8.5 : 4.2);
-    if (mag > 0.05) {
+    // Desired velocity on the ground, reached with a short acceleration so starts and stops ease.
+    let wx = 0, wz = 0;
+    if (mag > 0.02) {
       const fx = -Math.sin(yaw), fz = -Math.cos(yaw); // camera forward on the ground
       const rx = -fz, rz = fx;
-      const mx = (rx * ix - fx * iz) / (mag || 1), mz = (rz * ix - fz * iz) / (mag || 1);
-      const nx = player.position.x + mx * speed * dt, nz = player.position.z + mz * speed * dt;
+      const top = mag * (run ? 8.5 : 4.2);
+      wx = ((rx * ix - fx * iz) / Math.hypot(ix, iz)) * top;
+      wz = ((rz * ix - fz * iz) / Math.hypot(ix, iz)) * top;
+    }
+    const acc = 1 - Math.exp(-dt * (mag > 0.02 ? 9 : 12));
+    vel.x += (wx - vel.x) * acc;
+    vel.y += (wz - vel.y) * acc;
+    const speed = Math.hypot(vel.x, vel.y);
+    if (speed > 0.03) {
+      const nx = player.position.x + vel.x * dt, nz = player.position.z + vel.y * dt;
       const hit = mode === 'street' ? blockedAt : mode === 'hall' ? hallBlocked : photoBlocked;
       if (!hit(nx, nz)) player.position.set(nx, 0, nz);
-      else if (!hit(nx, player.position.z)) player.position.x = nx;
-      else if (!hit(player.position.x, nz)) player.position.z = nz;
-      const target = Math.atan2(mx, mz);
-      let d = target - player.rotation.y;
-      d = Math.atan2(Math.sin(d), Math.cos(d));
-      player.rotation.y += d * Math.min(1, dt * 12);
-    }
+      else if (!hit(nx, player.position.z)) { player.position.x = nx; vel.y *= 0.5; }
+      else if (!hit(player.position.x, nz)) { player.position.z = nz; vel.x *= 0.5; }
+      else vel.set(0, 0);
+      if (speed > 0.4) {
+        let d = Math.atan2(vel.x, vel.y) - player.rotation.y;
+        d = Math.atan2(Math.sin(d), Math.cos(d));
+        player.rotation.y += d * (1 - Math.exp(-dt * 10));
+      }
+    } else vel.set(0, 0);
     animateCharacter(player, speed, dt);
     // Play the three nearest video frames in view range; pause the rest to spare the device.
     if (videoFrames.length && now - (step.vidAt || 0) > 500) {
@@ -1053,8 +1154,8 @@ export async function enterStreet({ root, photos, place, lat, lng, onExit }) {
     }
     if (mode === 'photo') scene.traverse((o) => { if (o.userData.spin) o.rotation.y = Math.sin(now / 6000) * 0.05; });
     for (const st of standees) {
-      if (st.parent !== scene) continue;
       if (st.userData.grow < 1) { st.userData.grow = Math.min(1, st.userData.grow + dt * 1.8); const k = st.userData.grow; st.scale.setScalar(k < 1 ? 1 - Math.pow(1 - k, 3) * (1 - 0.01) : 1); }
+      if (st.parent !== scene) continue;
       const want = Math.atan2(camera.position.x - st.position.x, camera.position.z - st.position.z);
       let d = want - st.rotation.y;
       d = Math.atan2(Math.sin(d), Math.cos(d));
@@ -1064,7 +1165,7 @@ export async function enterStreet({ root, photos, place, lat, lng, onExit }) {
     // Memories: found by walking up to them; the route then leads to the next one, then the door.
     if (mode === 'street') {
       for (const m of memories) {
-        if (!m.found && Math.hypot(m.x - player.position.x, m.z - player.position.z) < 4) markFound(m);
+        if (!m.found && intro >= 1 && Math.hypot(m.x - player.position.x, m.z - player.position.z) < 4) markFound(m);
         if (!m.found) m.beam.material.opacity = 0.16 + 0.1 * Math.sin(now / 400 + m.x);
       }
       const t = target();
@@ -1095,13 +1196,13 @@ export async function enterStreet({ root, photos, place, lat, lng, onExit }) {
       chevrons.count = n;
       chevrons.instanceMatrix.needsUpdate = true;
       chevMat.opacity = 0.65 + 0.3 * Math.sin(now / 250);
-      drawMap({ x: player.position.x, z: player.position.z, yaw, route, memories, door: { x: markerPos.x, z: markerPos.z } });
+      if ((step.mapTick = (step.mapTick || 0) + 1) % 2 === 0) drawMap({ x: player.position.x, z: player.position.z, yaw, route, memories, door: { x: markerPos.x, z: markerPos.z } });
     }
 
     // Doors.
     if (cooldown === 0) {
-      if (mode === 'street' && Math.hypot(player.position.x - markerPos.x, player.position.z - markerPos.z) < 1.1) goHall();
-      else if (mode === 'hall' && Math.hypot(player.position.x - exitPos.x, player.position.z - exitPos.z) < 1.0) goStreet();
+      if (mode === 'street' && Math.hypot(player.position.x - markerPos.x, player.position.z - markerPos.z) < 1.1) fadeSwap(() => { goHall(); vel.set(0, 0); });
+      else if (mode === 'hall' && Math.hypot(player.position.x - exitPos.x, player.position.z - exitPos.z) < 1.0) fadeSwap(() => { goStreet(); vel.set(0, 0); });
     }
     marker.material.opacity = 0.25 + 0.15 * Math.sin(now / 300);
     marker.rotation.y += dt;
@@ -1109,10 +1210,9 @@ export async function enterStreet({ root, photos, place, lat, lng, onExit }) {
     // Nearest photo for the prompt.
     near = null;
     let nd = 3.6;
-    for (const m of pickFrames()) {
-      m.getWorldPosition(tmp);
-      const d = Math.hypot(tmp.x - player.position.x, tmp.z - player.position.z);
-      if (d < nd) { nd = d; near = m.userData.photo; }
+    for (const f of pickFrames()) {
+      const d = Math.hypot(f.x - player.position.x, f.z - player.position.z);
+      if (d < nd) { nd = d; near = f.photo; }
     }
     const prompt = $('.st-prompt');
     const doorDist = mode === 'street' ? Math.hypot(player.position.x - markerPos.x, player.position.z - markerPos.z) : Infinity;
@@ -1120,36 +1220,44 @@ export async function enterStreet({ root, photos, place, lat, lng, onExit }) {
     else if (doorDist < 7 && !viewing) { prompt.textContent = '✨ היכנסו לעיגול המואר כדי להיכנס לאירוע'; prompt.hidden = false; }
     else prompt.hidden = true;
 
-    // Third-person camera; pulled in so it never sits inside a building or outside the hall.
-    const head = player.position.clone().add(new THREE.Vector3(0, 1.6, 0));
-    // In narrow streets, rise above the roofs before pulling in close (as street games do).
-    const dir = new THREE.Vector3();
-    const camBad = (p) => mode === 'photo' ? p.y < 0.3 || p.z < dio.depth + 0.4 : mode === 'street'
-      ? solids.some((b) => p.y < b.h + 0.6 && p.x > b.box[0] - 0.3 && p.x < b.box[2] + 0.3 && p.z > b.box[1] - 0.3 && p.z < b.box[3] + 0.3 && (inPoly(p.x, p.z, b.pts) || closestOnPoly(p.x, p.z, b.pts).d < 0.3))
-      : Math.abs(p.x) > HW - 0.3 || Math.abs(p.z) > HD - 0.3 || p.y > HH - 0.3;
-    const clearPath = (d) => { for (let t = 0.35; t <= 1.001; t += 0.13) { tmp.copy(head).addScaledVector(dir, d * t); if (camBad(tmp)) return false; } return true; };
-    let found = false;
-    for (let pt = pitch; pt <= 1.45 && !found; pt += 0.15) {
-      dir.set(Math.sin(yaw) * Math.cos(pt), Math.sin(pt), Math.cos(yaw) * Math.cos(pt));
-      // Looking down steeply, back off far enough to clear the roofs.
-      const far = mode === 'street' && pt > 0.85 ? Math.max(camDist, 18) : camDist;
-      for (let d = far; d >= Math.min(camDist, 3); d -= 1) if (clearPath(d)) { camPos.copy(head).addScaledVector(dir, d); found = true; break; }
+    // Third-person camera: eased toward where it wants to be, so collision moves never snap.
+    camPos.copy(followPos());
+    const headNow = tmp2.copy(player.position); headNow.y += 1.6;
+    if (intro < 1) {
+      // Opening shot: circle down from above the venue to behind the visitor.
+      intro = Math.min(1, intro + (dt * introSpeed) / INTRO_S);
+      const e = intro < 0.5 ? 4 * intro ** 3 : 1 - Math.pow(-2 * intro + 2, 3) / 2;
+      const ang = introAng0 + (1 - e) * Math.PI * 0.9;
+      const r = 34 * (1 - e) + 8 * e, h = 42 * (1 - e) + 4 * e;
+      orbit.set(door.x + Math.sin(ang) * r, h, door.z + Math.cos(ang) * r);
+      camera.position.lerpVectors(orbit, camPos, e * e);
+      lookAt.lerpVectors(door, headNow, e);
+      $('.st-title').style.opacity = String(Math.max(0, Math.min(1, (0.85 - intro) * 4)));
+      if (intro >= 1) { $('.st-title').hidden = true; root.classList.remove('st-intro'); }
+    } else {
+      camera.position.lerp(camPos, 1 - Math.exp(-dt * 7));
+      lookAt.lerp(headNow, 1 - Math.exp(-dt * 14));
     }
-    if (!found) {
-      dir.set(Math.sin(yaw) * Math.cos(pitch), Math.sin(pitch), Math.cos(yaw) * Math.cos(pitch));
-      let d = camDist;
-      while (d > 1.2 && !clearPath(d)) d -= 0.4;
-      camPos.copy(head).addScaledVector(dir, d);
-    }
-    camera.position.lerp(camPos, Math.min(1, dt * 10));
-    camera.lookAt(head);
+    camera.lookAt(lookAt);
 
     if (mode === 'street' && renderer.shadowMap.enabled) {
       sun.position.set(player.position.x - 60, 120, player.position.z + 40);
       sun.target.position.copy(player.position);
     }
+    perf.logic = perf.logic * 0.95 + (performance.now() - t0) * 0.05;
     renderer.render(scene, camera);
+
+    // Keep the frame rate up: lower the render resolution on struggling devices, raise it back when there's headroom.
+    perf.t += dt; perf.n++;
+    if (perf.t > 1.5) {
+      const ms = (perf.t / perf.n) * 1000;
+      const pr = renderer.getPixelRatio();
+      if (ms > 26 && pr > 0.75) { renderer.setPixelRatio(Math.max(0.75, pr - 0.25)); resize(); }
+      else if (ms < 15 && pr < maxPR) { renderer.setPixelRatio(Math.min(maxPR, pr + 0.25)); resize(); }
+      perf.t = 0; perf.n = 0;
+    }
   }
+  const perf = { t: 0, n: 0, logic: 0 };
 
   function stop() {
     if (!running) return;
@@ -1170,8 +1278,13 @@ export async function enterStreet({ root, photos, place, lat, lng, onExit }) {
     onExit?.();
   }
 
-  camera.position.copy(player.position).add(new THREE.Vector3(Math.sin(yaw) * 7, 40, Math.cos(yaw) * 7));
+  camera.position.set(door.x + Math.sin(introAng0 + Math.PI * 0.9) * 34, 42, door.z + Math.cos(introAng0 + Math.PI * 0.9) * 34);
+  lookAt.copy(door);
+  $('.st-title b').textContent = venue.name || place || '';
+  $('.st-title span').textContent = photos[0]?.date ? dateFmt.format(photos[0].date) : '';
+  intro = 0.0001;
+  root.classList.add('st-intro');
   $('.st-loading').classList.add('done');
   requestAnimationFrame(step);
-  return { stop, debug: { player, camera, solids, venue, memories, standees, videoFrames, get mode() { return mode; }, markerPos, door, out } };
+  return { stop, debug: { get logicMs() { return perf.logic; }, get pixelRatio() { return renderer.getPixelRatio(); }, player, camera, solids, venue, memories, standees, videoFrames, get mode() { return mode; }, markerPos, door, out } };
 }

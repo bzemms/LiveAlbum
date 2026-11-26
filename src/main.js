@@ -233,6 +233,10 @@ async function goStreet(photo) {
     lng: photo.lng,
     onExit: () => {
       streetSession = null;
+      // Fade back out to the globe instead of cutting.
+      $('dive').classList.remove('out');
+      $('dive').hidden = false;
+      setTimeout(() => { $('dive').classList.add('out'); setTimeout(() => { $('dive').hidden = true; $('dive').classList.remove('out'); }, 700); }, 60);
       $('street').hidden = true;
       document.body.classList.remove('in-street');
       globe.resumeAnimation();
@@ -247,7 +251,9 @@ async function goStreet(photo) {
     toast('לא הצלחנו לבנות את הרחוב. נסו שוב.');
     return null;
   });
-  $('dive').hidden = true;
+  // Reveal the street with a fade rather than a cut.
+  $('dive').classList.add('out');
+  setTimeout(() => { $('dive').hidden = true; $('dive').classList.remove('out'); }, 700);
   window.__street = streetSession; // handy for debugging in the console
 }
 $('v-street').addEventListener('click', () => goStreet(state.photos[state.current]));

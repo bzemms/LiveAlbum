@@ -160,13 +160,13 @@ body.locating #globe { cursor: crosshair; }
 @media (prefers-reduced-motion: reduce) { .viewer { animation: none; } .panel { transition: none; } }
 
 /* Street level */
-.dive { position: fixed; inset: 0; z-index: 30; background: #f3f7fb; animation: dive-in 0.45s ease forwards; pointer-events: none; }
+.dive { position: fixed; inset: 0; z-index: 30; background: radial-gradient(circle at 50% 40%, #24345e, #0b1124 70%); animation: dive-in 0.5s ease forwards; pointer-events: none; }
+.dive.out { animation: dive-out 0.7s ease forwards; }
+@keyframes dive-out { from { opacity: 1; } to { opacity: 0; } }
 @keyframes dive-in { from { opacity: 0; } to { opacity: 1; } }
 body.in-street .panel, body.in-street .brand, body.in-street .credit, body.in-street #show-panel, body.in-street .viewer { display: none !important; }
 .street { position: fixed; inset: 0; z-index: 20; background: #000; touch-action: none; user-select: none; -webkit-user-select: none; }
 .st-canvas { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
-.street.st-flash::after { content: ""; position: absolute; inset: 0; background: #fff; animation: st-flash 0.6s ease forwards; pointer-events: none; }
-@keyframes st-flash { from { opacity: 0.9; } to { opacity: 0; } }
 .st-top {
   position: absolute; top: calc(12px + env(safe-area-inset-top, 0px)); left: calc(12px + env(safe-area-inset-left, 0px)); right: calc(12px + env(safe-area-inset-right, 0px));
   display: flex; justify-content: space-between; align-items: flex-start; gap: 12px; pointer-events: none;
@@ -202,9 +202,9 @@ body.in-street .panel, body.in-street .brand, body.in-street .credit, body.in-st
 .st-photo figcaption { display: flex; justify-content: space-between; gap: 12px; padding-top: 10px; }
 .st-photo figcaption b { font-family: var(--f-display); }
 .st-photo figcaption span { color: #5b6670; font-size: 0.85rem; }
-.st-loading { position: absolute; inset: 0; display: grid; place-content: center; justify-items: center; gap: 14px; background: #f3f7fb; color: #1d2b38; font-family: var(--f-display); font-size: 1.2rem; transition: opacity 0.8s ease; }
+.st-loading { position: absolute; inset: 0; display: grid; place-content: center; justify-items: center; gap: 14px; background: radial-gradient(circle at 50% 40%, #24345e, #0b1124 70%); color: #eef3f7; font-family: var(--f-display); font-size: 1.2rem; transition: opacity 0.9s ease; }
 .st-loading.done { opacity: 0; pointer-events: none; }
-.st-spinner { width: 38px; height: 38px; border-radius: 50%; border: 4px solid #cfdbe6; border-top-color: #1d2b38; animation: spin 0.9s linear infinite; }
+.st-spinner { width: 38px; height: 38px; border-radius: 50%; border: 4px solid rgba(255,255,255,0.2); border-top-color: var(--gold); animation: spin 0.9s linear infinite; }
 @keyframes spin { to { transform: rotate(360deg); } }
 @media (max-width: 760px) { .st-help { font-size: 0.7rem; } .st-place b { font-size: 0.92rem; } }
 
@@ -249,3 +249,20 @@ body.in-street .panel, body.in-street .brand, body.in-street .credit, body.in-st
 .vid-dot { position: absolute; bottom: -6px; left: -8px; width: 20px; height: 20px; border-radius: 50%; background: #e2445c; color: #fff; font-size: 0.6rem; display: grid; place-items: center; }
 .st-photo video { display: block; max-width: 100%; max-height: 72vh; background: #000; }
 @media (max-width: 760px) { .viewer video { max-height: 30vh; } }
+
+/* Smooth transitions in the street */
+.street::before { content: ""; position: absolute; inset: 0; z-index: 4; background: #070a12; opacity: 0; pointer-events: none; transition: opacity 0.3s ease; }
+.street.st-fade::before { opacity: 1; }
+.st-title {
+  position: absolute; left: 50%; top: 34%; transform: translateX(-50%); text-align: center; pointer-events: none;
+  color: #fff; text-shadow: 0 2px 18px rgba(0, 0, 0, 0.7); display: flex; flex-direction: column; gap: 4px; opacity: 0;
+}
+.st-title b { font-family: var(--f-display); font-size: clamp(1.6rem, 5vw, 2.8rem); }
+.st-title span { font-size: clamp(0.95rem, 2.5vw, 1.2rem); color: var(--gold); }
+.st-toast, .st-prompt, .st-count { transition: opacity 0.25s ease; }
+@media (prefers-reduced-motion: reduce) { .street::before { transition: none; } }
+
+/* Keep the opening shot clean: the game HUD fades in once the camera lands. */
+.st-prompt, .st-toast, .st-radar, .st-help, .st-status, .st-joy { transition: opacity 0.6s ease; }
+.street.st-intro .st-prompt, .street.st-intro .st-toast, .street.st-intro .st-radar,
+.street.st-intro .st-help, .street.st-intro .st-status, .street.st-intro .st-joy { opacity: 0; }
