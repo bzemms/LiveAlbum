@@ -1,0 +1,64 @@
+<!doctype html>
+<html lang="he" dir="rtl">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <title>LiveAlbum</title>
+    <meta name="description" content="אלבום התמונות שלכם, מפוזר על גלובוס תלת-ממדי לפי המקום שבו כל תמונה צולמה." />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Rubik:wght@500;700&family=Heebo:wght@400;500;600&display=swap" />
+  </head>
+  <body>
+    <div id="globe" aria-label="גלובוס התמונות"></div>
+
+    <header class="brand">
+      <div class="logo">Live<span>Album</span></div>
+      <div class="tag">האלבום שלכם, במקום שבו הוא קרה</div>
+    </header>
+
+    <aside class="panel" id="panel">
+      <div class="panel-head">
+        <div>
+          <div class="eyebrow" id="album-kind">אלבום דוגמה</div>
+          <h1 id="album-title">טיולי המשפחה</h1>
+          <div class="sub" id="album-sub"></div>
+        </div>
+        <button class="icon-btn" id="toggle-panel" aria-label="הסתר רשימה" title="הסתר רשימה">‹</button>
+      </div>
+
+      <div class="actions">
+        <button class="btn primary" id="tour-btn">▶ התחל מסע</button>
+        <label class="btn" for="file-input">＋ הוסף תמונות</label>
+        <input type="file" id="file-input" accept="image/*,.heic,.heif" multiple hidden />
+      </div>
+
+      <ol class="timeline" id="timeline"></ol>
+      <div class="no-loc" id="no-loc" hidden></div>
+      <p class="privacy">התמונות לא עולות לשום שרת ונשארות בדפדפן שלך. כדי להציג שם של מקום, רק הקואורדינטות (בלי התמונה) נשלחות ל-OpenStreetMap.</p>
+    </aside>
+
+    <button class="btn floating" id="show-panel" hidden>☰ רשימה</button>
+
+    <div class="viewer" id="viewer" hidden>
+      <figure>
+        <img id="viewer-img" alt="" />
+        <figcaption>
+          <div class="v-place" id="viewer-place"></div>
+          <div class="v-date" id="viewer-date"></div>
+        </figcaption>
+      </figure>
+      <div class="v-nav">
+        <button class="icon-btn" id="v-next" aria-label="התמונה הבאה">›</button>
+        <span id="v-count"></span>
+        <button class="icon-btn" id="v-prev" aria-label="התמונה הקודמת">‹</button>
+        <button class="icon-btn" id="v-close" aria-label="סגור">✕</button>
+      </div>
+    </div>
+
+    <div class="drop" id="drop" hidden><div>שחררו כאן את התמונות</div></div>
+    <div class="toast" id="toast" hidden></div>
+    <div class="credit">Imagery © Esri, Maxar, Earthstar Geographics · NASA Blue Marble</div>
+
+    <script type="module" src="/src/main.js"></script>
+  </body>
+</html>
