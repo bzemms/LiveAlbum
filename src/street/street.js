@@ -1,0 +1,724 @@
+// Street level: a stylised 3D neighbourhood built from the real map around a photo spot.
+// The visitor walks as a character (third person). The photos stand in front of the venue,
+// and a glowing door leads into a hall with every photo from that place on its walls.
+import * as THREE from 'three';
+import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js';
+import { loadArea } from './osm.js';
+
+const DAY = {
+  sky: 0xa9d3f0, fog: 0xc9e2f2, ground: 0xd8d2c4, road: 0x55595f, foot: 0xc2bba9,
+  hemiSky: 0xffffff, hemiGround: 0xb9a98a, hemi: 1.1, sun: 0xfff1d6, sunI: 2.2,
+  walls: ['#efe3cf', '#e6d2b5', '#d9dfe2', '#ecc9b8', '#c9d6e6', '#f3ead9', '#dcbfae', '#e9dcc4'],
+};
+const NIGHT = {
+  sky: 0x1c2b57, fog: 0x2a3863, ground: 0x7a7884, road: 0x3a3d46, foot: 0x8a8690,
+  hemiSky: 0x9fb0e8, hemiGround: 0x4a4250, hemi: 1.35, sun: 0xc4d0ff, sunI: 0.9,
+  walls: ['#c9bfb4', '#bdb3c4', '#aab7c6', '#cdb8b4', '#a9b6cc', '#d2c8cf', '#c3b2ad', '#b9bccf'],
+};
+
+const isTouch = matchMedia('(pointer: coarse)').matches;
+const dateFmt = new Intl.DateTimeFormat('he-IL', { day: 'numeric', month: 'long', year: 'numeric' });
+
+// ---------- 2D geometry helpers (x, z in metres) ----------
+function inPoly(x, z, pts) {
+  let inside = false;
+  for (let i = 0, j = pts.length - 1; i < pts.length; j = i++) {
+    const [xi, zi] = pts[i], [xj, zj] = pts[j];
+    if ((zi > z) !== (zj > z) && x < ((xj - xi) * (z - zi)) / (zj - zi) + xi) inside = !inside;
+  }
+  return inside;
+}
+function closestOnPoly(x, z, pts) {
+  let best = null;
+  for (let i = 0; i < pts.length; i++) {
+    const [ax, az] = pts[i], [bx, bz] = pts[(i + 1) % pts.length];
+    const dx = bx - ax, dz = bz - az, len2 = dx * dx + dz * dz || 1;
+    const t = Math.max(0, Math.min(1, ((x - ax) * dx + (z - az) * dz) / len2));
+    const px = ax + t * dx, pz = az + t * dz, d = Math.hypot(x - px, z - pz);
+    if (!best || d < best.d) best = { x: px, z: pz, d, ex: dx, ez: dz, len: Math.sqrt(len2) };
+  }
+  return best;
+}
+const bbox = (pts) => pts.reduce((b, [x, z]) => [Math.min(b[0], x), Math.min(b[1], z), Math.max(b[2], x), Math.max(b[3], z)], [Infinity, Infinity, -Infinity, -Infinity]);
+
+// ---------- Canvas textures ----------
+function textSprite(text, { size = 56, color = '#fff', bg = 'rgba(15,22,32,0.78)', scale = 1 } = {}) {
+  const c = document.createElement('canvas');
+  const g = c.getContext('2d');
+  g.font = `700 ${size}px Rubik, Heebo, system-ui, sans-serif`;
+  const w = Math.ceil(g.measureText(text).width) + size * 1.2, h = Math.ceil(size * 1.7);
+  c.width = w; c.height = h;
+  g.font = `700 ${size}px Rubik, Heebo, system-ui, sans-serif`;
+  g.fillStyle = bg;
+  g.beginPath(); g.roundRect(0, 0, w, h, h / 2); g.fill();
+  g.fillStyle = color; g.textAlign = 'center'; g.textBaseline = 'middle'; g.direction = 'rtl';
+  g.fillText(text, w / 2, h / 2 + 2);
+  const tex = new THREE.CanvasTexture(c);
+  tex.colorSpace = THREE.SRGBColorSpace;
+  const s = new THREE.Sprite(new THREE.SpriteMaterial({ map: tex, depthWrite: false }));
+  s.scale.set((w / h) * 0.6 * scale, 0.6 * scale, 1);
+  return s;
+}
+function planksTexture() {
+  const c = document.createElement('canvas');
+  c.width = 512; c.height = 512;
+  const g = c.getContext('2d');
+  const tones = ['#7a5536', '#83603f', '#6f4c30', '#8a6646', '#764f33'];
+  for (let i = 0; i < 8; i++) {
+    g.fillStyle = tones[i % tones.length];
+    g.fillRect(0, i * 64, 512, 64);
+    g.fillStyle = 'rgba(0,0,0,0.35)';
+    g.fillRect(0, i * 64, 512, 2);
+    const off = (i * 173) % 512;
+    g.fillRect(off, i * 64, 2, 64);
+  }
+  const t = new THREE.CanvasTexture(c);
+  t.wrapS = t.wrapT = THREE.RepeatWrapping;
+  t.repeat.set(6, 4);
+  t.colorSpace = THREE.SRGBColorSpace;
+  return t;
+}
+
+// ---------- Character ----------
+function makeCharacter() {
+  const g = new THREE.Group();
+  const shirt = new THREE.MeshLambertMaterial({ color: 0xf4f4f0 });
+  const pants = new THREE.MeshLambertMaterial({ color: 0x23262d });
+  const skin = new THREE.MeshLambertMaterial({ color: 0xe0b48f });
+  const torso = new THREE.Mesh(new THREE.CapsuleGeometry(0.26, 0.5, 4, 10), shirt);
+  torso.position.y = 1.2;
+  const head = new THREE.Mesh(new THREE.SphereGeometry(0.2, 16, 12), skin);
+  head.position.y = 1.72;
+  const hair = new THREE.Mesh(new THREE.SphereGeometry(0.205, 16, 8, 0, Math.PI * 2, 0, Math.PI / 2.2), pants);
+  hair.position.y = 1.74;
+  const limb = (w, h, mat) => {
+    const pivot = new THREE.Group();
+    const m = new THREE.Mesh(new THREE.BoxGeometry(w, h, w), mat);
+    m.position.y = -h / 2;
+    pivot.add(m);
+    return pivot;
+  };
+  const legL = limb(0.17, 0.82, pants), legR = limb(0.17, 0.82, pants);
+  legL.position.set(-0.12, 0.84, 0); legR.position.set(0.12, 0.84, 0);
+  const armL = limb(0.12, 0.62, shirt), armR = limb(0.12, 0.62, shirt);
+  armL.position.set(-0.36, 1.48, 0); armR.position.set(0.36, 1.48, 0);
+  g.add(torso, head, hair, legL, legR, armL, armR);
+  g.traverse((o) => { if (o.isMesh) o.castShadow = true; });
+  g.userData = { legL, legR, armL, armR, phase: 0 };
+  return g;
+}
+function animateCharacter(ch, speed, dt) {
+  const u = ch.userData;
+  u.phase += dt * (speed > 0.1 ? 4 + speed * 1.1 : 0);
+  const swing = speed > 0.1 ? Math.min(0.8, 0.35 + speed * 0.07) : 0;
+  const s = Math.sin(u.phase) * swing;
+  const ease = (o, v) => (o.rotation.x += (v - o.rotation.x) * Math.min(1, dt * 12));
+  ease(u.legL, s); ease(u.legR, -s); ease(u.armL, -s * 0.8); ease(u.armR, s * 0.8);
+}
+
+// ---------- Photo frame ----------
+function photoFrame(photo, width, { posts = true, loader }) {
+  const g = new THREE.Group();
+  const frameMat = new THREE.MeshLambertMaterial({ color: 0xfbfaf6 });
+  const frame = new THREE.Mesh(new THREE.BoxGeometry(width + 0.24, width * 0.75 + 0.24, 0.08), frameMat);
+  const pic = new THREE.Mesh(new THREE.PlaneGeometry(width, width * 0.75), new THREE.MeshBasicMaterial({ color: 0xdddddd }));
+  pic.position.z = 0.045;
+  pic.userData.photo = photo;
+  frame.userData.photo = photo;
+  g.add(frame, pic);
+  if (posts) {
+    const postMat = new THREE.MeshLambertMaterial({ color: 0x2b2f36 });
+    for (const sx of [-1, 1]) {
+      const p = new THREE.Mesh(new THREE.BoxGeometry(0.08, 1.4, 0.08), postMat);
+      p.position.set((sx * width) / 2.4, -0.7 - (width * 0.75) / 2, -0.02);
+      g.add(p);
+    }
+  }
+  loader.load(photo.full, (tex) => {
+    tex.colorSpace = THREE.SRGBColorSpace;
+    const a = tex.image.width / tex.image.height || 4 / 3;
+    const h = width / a;
+    pic.geometry.dispose();
+    pic.geometry = new THREE.PlaneGeometry(width, h);
+    frame.geometry.dispose();
+    frame.geometry = new THREE.BoxGeometry(width + 0.24, h + 0.24, 0.08);
+    pic.material.map = tex;
+    pic.material.color.set(0xffffff);
+    pic.material.needsUpdate = true;
+    g.userData.height = h;
+    g.dispatchEvent({ type: 'sized', height: h });
+  });
+  g.traverse((o) => { if (o.isMesh) o.castShadow = true; });
+  return { group: g, pick: [pic, frame] };
+}
+
+// ---------- Main ----------
+export async function enterStreet({ root, photos, place, lat, lng, onExit }) {
+  const night = photos.filter((p) => p.date && (p.date.getHours() >= 18 || p.date.getHours() < 6)).length > photos.length / 2;
+  const T = night ? NIGHT : DAY;
+
+  root.innerHTML = `
+    <canvas class="st-canvas"></canvas>
+    <div class="st-top">
+      <button class="st-btn" data-act="exit">🌍 חזרה לגלובוס</button>
+      <div class="st-place"><b></b><span></span></div>
+    </div>
+    <div class="st-prompt" hidden></div>
+    <div class="st-help">${isTouch ? 'ג׳ויסטיק להליכה · גרירה לסיבוב המצלמה · הקשה על תמונה להגדלה' : 'WASD או חצים להליכה · Shift לריצה · גרירה לסיבוב · E או לחיצה על תמונה להגדלה'}</div>
+    <div class="st-joy" ${isTouch ? '' : 'hidden'}><div class="st-knob"></div></div>
+    <div class="st-photo" hidden><figure><img alt=""><figcaption><b></b><span></span></figcaption></figure><button class="st-btn" data-act="close-photo">✕ סגור</button></div>
+    <div class="st-loading"><div class="st-spinner"></div><div>יורדים לרחוב…</div></div>`;
+  const $ = (s) => root.querySelector(s);
+  $('.st-place b').textContent = place || 'המקום';
+
+  const renderer = new THREE.WebGLRenderer({ canvas: $('.st-canvas'), antialias: true });
+  renderer.setPixelRatio(Math.min(devicePixelRatio, isTouch ? 1.75 : 2));
+  renderer.toneMapping = THREE.ACESFilmicToneMapping;
+  renderer.shadowMap.enabled = !isTouch;
+  renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+  const camera = new THREE.PerspectiveCamera(60, 1, 0.1, 900);
+  const loader = new THREE.TextureLoader();
+
+  // ----- Street scene -----
+  const street = new THREE.Scene();
+  street.background = new THREE.Color(T.sky);
+  street.fog = new THREE.Fog(T.fog, night ? 70 : 90, night ? 260 : 320);
+  street.add(new THREE.HemisphereLight(T.hemiSky, T.hemiGround, T.hemi));
+  const sun = new THREE.DirectionalLight(T.sun, T.sunI);
+  sun.position.set(-60, 120, 40);
+  sun.castShadow = true;
+  sun.shadow.mapSize.set(2048, 2048);
+  Object.assign(sun.shadow.camera, { left: -70, right: 70, top: 70, bottom: -70, near: 1, far: 400 });
+  sun.shadow.bias = -0.0005;
+  street.add(sun, sun.target);
+
+  const area = await loadArea(lat, lng);
+  $('.st-place span').textContent = area.source === 'osm' ? 'מבנים ורחובות לפי OpenStreetMap' : 'שכונה לדוגמה: מפת האזור לא נטענה';
+  const R = 260;
+  const ground = new THREE.Mesh(new THREE.CircleGeometry(R + 120, 64), new THREE.MeshLambertMaterial({ color: T.ground }));
+  ground.rotation.x = -Math.PI / 2;
+  ground.receiveShadow = true;
+  street.add(ground);
+
+  // Roads: ribbons with round joints, merged into two meshes.
+  const roadGeo = { car: [], foot: [] };
+  for (const r of area.roads) {
+    const y = r.foot ? 0.03 : 0.02;
+    const list = r.foot ? roadGeo.foot : roadGeo.car;
+    for (let i = 0; i < r.pts.length - 1; i++) {
+      const [ax, az] = r.pts[i], [bx, bz] = r.pts[i + 1];
+      const len = Math.hypot(bx - ax, bz - az);
+      if (len < 0.1) continue;
+      const seg = new THREE.PlaneGeometry(len, r.width);
+      seg.rotateX(-Math.PI / 2);
+      seg.rotateY(-Math.atan2(bz - az, bx - ax));
+      seg.translate((ax + bx) / 2, y, (az + bz) / 2);
+      seg.deleteAttribute('uv');
+      list.push(seg);
+    }
+    for (const [x, z] of r.pts) {
+      const d = new THREE.CircleGeometry(r.width / 2, 12);
+      d.rotateX(-Math.PI / 2);
+      d.translate(x, y, z);
+      d.deleteAttribute('uv');
+      list.push(d);
+    }
+  }
+  for (const [k, color] of [['car', T.road], ['foot', T.foot]]) {
+    if (!roadGeo[k].length) continue;
+    const m = new THREE.Mesh(mergeGeometries(roadGeo[k]), new THREE.MeshLambertMaterial({ color }));
+    m.receiveShadow = true;
+    street.add(m);
+    roadGeo[k].forEach((g) => g.dispose());
+  }
+
+  // Buildings: extruded footprints, coloured per building, merged into one mesh.
+  const solids = area.buildings.map((b) => ({ ...b, box: bbox(b.pts) }));
+  // The venue: the building the photo spot falls in, else the nearest one, else a pavilion we add.
+  let venue = solids.find((b) => inPoly(0, 0, b.pts));
+  if (!venue) {
+    let best = null;
+    for (const b of solids) {
+      const c = closestOnPoly(0, 0, b.pts);
+      if (c.d < 45 && (!best || c.d < best.c.d)) best = { b, c };
+    }
+    venue = best?.b;
+  }
+  if (!venue) {
+    venue = { id: -1, pts: [[-8, -16], [8, -16], [8, -6], [-8, -6]], h: 6, name: null };
+    venue.box = bbox(venue.pts);
+    solids.push(venue);
+  }
+
+  const bGeos = [];
+  const col = new THREE.Color();
+  solids.forEach((b) => {
+    const shape = new THREE.Shape(b.pts.map(([x, z]) => new THREE.Vector2(x, -z)));
+    let geo;
+    try {
+      geo = new THREE.ExtrudeGeometry(shape, { depth: b.h, bevelEnabled: false });
+    } catch {
+      return;
+    }
+    geo.rotateX(-Math.PI / 2);
+    geo.deleteAttribute('uv');
+    const n = geo.attributes.position.count;
+    const colors = new Float32Array(n * 3);
+    col.set(b === venue ? (night ? '#b49a6e' : '#f2d9a6') : T.walls[(b.id >>> 0) % T.walls.length]);
+    const roof = col.clone().multiplyScalar(0.82);
+    const normals = geo.attributes.normal;
+    for (let v = 0; v < n; v++) {
+      const c = normals.getY(v) > 0.5 ? roof : col;
+      colors.set([c.r, c.g, c.b], v * 3);
+    }
+    geo.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+    bGeos.push(geo.index ? geo.toNonIndexed() : geo);
+  });
+  if (bGeos.length) {
+    const city = new THREE.Mesh(mergeGeometries(bGeos), new THREE.MeshLambertMaterial({ vertexColors: true, flatShading: true }));
+    city.castShadow = true;
+    city.receiveShadow = true;
+    street.add(city);
+    bGeos.forEach((g) => g.dispose());
+  }
+
+  // Door on the venue wall facing the street, and the outward direction from it.
+  let doorAt = closestOnPoly(0, 0, venue.pts);
+  if (doorAt.len < 3) {
+    // Too narrow a wall for a door: use the longest wall instead.
+    let longest = null;
+    venue.pts.forEach(([ax, az], i) => {
+      const [bx, bz] = venue.pts[(i + 1) % venue.pts.length];
+      const len = Math.hypot(bx - ax, bz - az);
+      if (!longest || len > longest.len) longest = { x: (ax + bx) / 2, z: (az + bz) / 2, ex: bx - ax, ez: bz - az, len };
+    });
+    doorAt = longest;
+  }
+  const edge = new THREE.Vector2(doorAt.ex, doorAt.ez).normalize();
+  let out = new THREE.Vector2(-edge.y, edge.x);
+  if (inPoly(doorAt.x + out.x * 0.5, doorAt.z + out.y * 0.5, venue.pts)) out.negate();
+  const door = new THREE.Vector3(doorAt.x, 0, doorAt.z);
+  const facing = Math.atan2(out.x, out.y); // rotation.y that makes +z face `out`
+
+  // Door: glowing frame, a GTA-style marker on the ground, and a sign.
+  const doorGroup = new THREE.Group();
+  doorGroup.position.copy(door).add(new THREE.Vector3(out.x * 0.06, 0, out.y * 0.06));
+  doorGroup.rotation.y = facing;
+  const glow = new THREE.MeshBasicMaterial({ color: 0xffd678 });
+  const fr = (w, h, x, y) => { const m = new THREE.Mesh(new THREE.BoxGeometry(w, h, 0.12), glow); m.position.set(x, y, 0); doorGroup.add(m); };
+  fr(0.16, 2.7, -1.0, 1.35); fr(0.16, 2.7, 1.0, 1.35); fr(2.16, 0.16, 0, 2.7);
+  const inner = new THREE.Mesh(new THREE.PlaneGeometry(1.84, 2.62), new THREE.MeshBasicMaterial({ color: night ? 0xffb85c : 0x3a2a18, transparent: true, opacity: 0.92 }));
+  inner.position.set(0, 1.31, 0.01);
+  doorGroup.add(inner);
+  const sign = textSprite('כניסה לאירוע', { size: 54, color: '#241a05', bg: '#ffd678', scale: 1.4 });
+  sign.position.set(0, 3.45, 0.2);
+  doorGroup.add(sign);
+  street.add(doorGroup);
+  const markerMat = new THREE.MeshBasicMaterial({ color: 0xffd34d, transparent: true, opacity: 0.35, depthWrite: false, side: THREE.DoubleSide });
+  const marker = new THREE.Mesh(new THREE.CylinderGeometry(1.1, 1.1, 1.6, 32, 1, true), markerMat);
+  const markerPos = door.clone().add(new THREE.Vector3(out.x * 1.6, 0.8, out.y * 1.6));
+  marker.position.copy(markerPos);
+  street.add(marker);
+  if (place) {
+    const name = textSprite(venue.name || place, { size: 64, scale: 1.8 });
+    name.position.copy(door).add(new THREE.Vector3(out.x * 0.5, Math.min(venue.h + 2.2, 14), out.y * 0.5));
+    street.add(name);
+  }
+
+  // Photos in front of the venue: a short exhibition on both sides of the path to the door.
+  const pickables = [];
+  const streetPhotos = photos.slice(0, 6);
+  const tangent = new THREE.Vector2(out.y, -out.x);
+  streetPhotos.forEach((p, i) => {
+    const side = i % 2 === 0 ? 1 : -1;
+    const k = Math.floor(i / 2);
+    const along = side * (2.9 + k * 3.1);
+    const dist = 4.2 + k * 1.6;
+    const { group, pick } = photoFrame(p, 2.3, { loader });
+    group.position.set(door.x + out.x * dist + tangent.x * along, 2.35, door.z + out.y * dist + tangent.y * along);
+    group.rotation.y = facing + side * 0.32;
+    street.add(group);
+    pickables.push(...pick);
+    if (night) {
+      const l = new THREE.PointLight(0xffd9a0, 6, 7, 1.6);
+      l.position.set(group.position.x + out.x * 1.2, 3.4, group.position.z + out.y * 1.2);
+      street.add(l);
+    }
+  });
+  if (night) {
+    const l = new THREE.PointLight(0xffc070, 14, 10, 1.4);
+    l.position.copy(door).add(new THREE.Vector3(out.x * 2, 3, out.y * 2));
+    street.add(l);
+  }
+
+  // Trees along the bigger roads, and lamp posts at night.
+  const treeSpots = [], lampSpots = [];
+  const blocked = (x, z) => solids.some((b) => x > b.box[0] - 1 && x < b.box[2] + 1 && z > b.box[1] - 1 && z < b.box[3] + 1 && inPoly(x, z, b.pts));
+  for (const r of area.roads) {
+    if (r.foot) continue;
+    for (let i = 0; i < r.pts.length - 1; i++) {
+      const [ax, az] = r.pts[i], [bx, bz] = r.pts[i + 1];
+      const len = Math.hypot(bx - ax, bz - az);
+      const nx = -(bz - az) / len, nz = (bx - ax) / len;
+      for (let s = 6; s < len - 3; s += 13) {
+        const t = s / len, x = ax + (bx - ax) * t, z = az + (bz - az) * t;
+        const side = (Math.floor(s / 13) % 2 ? 1 : -1) * (r.width / 2 + 1.6);
+        const px = x + nx * side, pz = z + nz * side;
+        if (Math.hypot(px, pz) > R || blocked(px, pz) || Math.hypot(px - door.x, pz - door.z) < 9) continue;
+        if (treeSpots.length < 400) treeSpots.push([px, pz]);
+        if (night && s % 26 < 13 && lampSpots.length < 200) lampSpots.push([x - nx * side, z - nz * side]);
+      }
+    }
+  }
+  const dummy = new THREE.Object3D();
+  const instanced = (geo, mat, spots, y, scaleRand = 0) => {
+    if (!spots.length) return;
+    const m = new THREE.InstancedMesh(geo, mat, spots.length);
+    spots.forEach(([x, z], i) => {
+      const s = 1 + ((i * 37) % 10) / 10 * scaleRand;
+      dummy.position.set(x, y * s, z); dummy.scale.setScalar(s); dummy.rotation.y = i; dummy.updateMatrix();
+      m.setMatrixAt(i, dummy.matrix);
+    });
+    m.castShadow = true;
+    street.add(m);
+  };
+  instanced(new THREE.CylinderGeometry(0.12, 0.16, 2.2, 6), new THREE.MeshLambertMaterial({ color: 0x6b4a2f }), treeSpots, 1.1, 0.4);
+  instanced(new THREE.IcosahedronGeometry(1.5, 0), new THREE.MeshLambertMaterial({ color: night ? 0x2f5a3a : 0x6aa84f, flatShading: true }), treeSpots, 3.1, 0.4);
+  instanced(new THREE.CylinderGeometry(0.06, 0.08, 5, 6), new THREE.MeshLambertMaterial({ color: 0x30343b }), lampSpots, 2.5);
+  instanced(new THREE.SphereGeometry(0.28, 10, 8), new THREE.MeshBasicMaterial({ color: 0xffe2a8 }), lampSpots, 5.1);
+
+  // Collision: building footprints (2D) with a small body radius.
+  const BODY = 0.35;
+  const blockedAt = (x, z) => solids.some((b) => x > b.box[0] - BODY && x < b.box[2] + BODY && z > b.box[1] - BODY && z < b.box[3] + BODY &&
+    (inPoly(x, z, b.pts) || closestOnPoly(x, z, b.pts).d < BODY));
+
+  // ----- Hall scene -----
+  const hall = new THREE.Scene();
+  hall.background = new THREE.Color(0x0e1222);
+  const HW = 13, HD = 8, HH = 5.2;
+  hall.add(new THREE.HemisphereLight(0xffe7c4, 0x3a2a1c, 0.9));
+  const floor = new THREE.Mesh(new THREE.PlaneGeometry(HW * 2, HD * 2), new THREE.MeshLambertMaterial({ map: planksTexture() }));
+  floor.rotation.x = -Math.PI / 2;
+  floor.receiveShadow = true;
+  hall.add(floor);
+  const wallMat = new THREE.MeshLambertMaterial({ color: 0xf1e9dc, side: THREE.BackSide });
+  const room = new THREE.Mesh(new THREE.BoxGeometry(HW * 2, HH, HD * 2), wallMat);
+  room.position.y = HH / 2 - 0.01;
+  hall.add(room);
+  // String lights across the ceiling, like an evening terrace.
+  const bulbGeo = new THREE.SphereGeometry(0.07, 8, 6);
+  const bulbMat = new THREE.MeshBasicMaterial({ color: 0xfff0c2 });
+  const bulbs = [];
+  for (let line = -2; line <= 2; line++) {
+    const z = line * 3.2;
+    for (let x = -HW + 0.6; x <= HW - 0.6; x += 0.9) {
+      const sag = 0.7 * (1 - (x / HW) ** 2);
+      bulbs.push([x, HH - 0.3 - sag, z]);
+    }
+  }
+  const bulbMesh = new THREE.InstancedMesh(bulbGeo, bulbMat, bulbs.length);
+  bulbs.forEach(([x, y, z], i) => { dummy.position.set(x, y, z); dummy.scale.setScalar(1); dummy.rotation.set(0, 0, 0); dummy.updateMatrix(); bulbMesh.setMatrixAt(i, dummy.matrix); });
+  hall.add(bulbMesh);
+  for (const [x, z] of [[-7, -3], [0, 0], [7, 3], [-7, 4], [7, -4]]) {
+    const l = new THREE.PointLight(0xffd59a, 14, 16, 1.3);
+    l.position.set(x, HH - 1, z);
+    hall.add(l);
+  }
+  // Round tables with white cloths and chairs, as at a family event.
+  const tables = [[-7, -3.2], [-7, 3.2], [7, -3.2], [7, 3.2], [0, -4.2]];
+  const cloth = new THREE.MeshLambertMaterial({ color: 0xf7f5f0 });
+  const chairMat = new THREE.MeshLambertMaterial({ color: 0xffffff });
+  for (const [x, z] of tables) {
+    const t = new THREE.Mesh(new THREE.CylinderGeometry(1.15, 1.25, 0.78, 28), cloth);
+    t.position.set(x, 0.39, z);
+    t.castShadow = true;
+    hall.add(t);
+    for (let a = 0; a < 8; a++) {
+      const ang = (a / 8) * Math.PI * 2;
+      const c = new THREE.Group();
+      const seat = new THREE.Mesh(new THREE.BoxGeometry(0.42, 0.06, 0.42), chairMat);
+      seat.position.y = 0.46;
+      const back = new THREE.Mesh(new THREE.BoxGeometry(0.42, 0.55, 0.05), chairMat);
+      back.position.set(0, 0.75, 0.2);
+      c.add(seat, back);
+      c.position.set(x + Math.cos(ang) * 1.65, 0, z + Math.sin(ang) * 1.65);
+      c.rotation.y = -ang + Math.PI / 2;
+      hall.add(c);
+    }
+  }
+  // Photos on the walls: back wall, then the side walls, two rows when there are many.
+  const slots = [];
+  const addRow = (y) => {
+    for (let x = -HW + 2.4; x <= HW - 2.4; x += 3.6) slots.push({ pos: [x, y, -HD + 0.06], rot: 0 });
+    for (let z = -HD + 2.6; z <= HD - 2.6; z += 3.4) slots.push({ pos: [-HW + 0.06, y, z], rot: Math.PI / 2 });
+    for (let z = -HD + 2.6; z <= HD - 2.6; z += 3.4) slots.push({ pos: [HW - 0.06, y, z], rot: -Math.PI / 2 });
+  };
+  addRow(2.05);
+  if (photos.length > slots.length) addRow(4.0);
+  photos.slice(0, slots.length).forEach((p, i) => {
+    const { group, pick } = photoFrame(p, photos.length > 14 ? 1.7 : 2.2, { posts: false, loader });
+    group.position.set(...slots[i].pos);
+    group.rotation.y = slots[i].rot;
+    hall.add(group);
+    pickables.push(...pick);
+    const spot = new THREE.SpotLight(0xfff1d6, 18, 6, 0.5, 0.6, 1.2);
+    const dir = new THREE.Vector3(0, 0, 1).applyAxisAngle(new THREE.Vector3(0, 1, 0), slots[i].rot);
+    spot.position.set(slots[i].pos[0] + dir.x * 1.6, HH - 0.6, slots[i].pos[2] + dir.z * 1.6);
+    spot.target = group;
+    hall.add(spot);
+  });
+  const title = textSprite(`${place || 'האירוע'}${photos[0]?.date ? ' · ' + dateFmt.format(photos[0].date) : ''}`, { size: 60, scale: 2 });
+  title.position.set(0, HH - 1.2, -HD + 0.4);
+  hall.add(title);
+  // Exit door on the front wall.
+  const exit = new THREE.Group();
+  exit.position.set(0, 0, HD - 0.05);
+  exit.rotation.y = Math.PI;
+  const eGlow = new THREE.MeshBasicMaterial({ color: 0x9fe0ff });
+  for (const [w, h, x, y] of [[0.16, 2.7, -1, 1.35], [0.16, 2.7, 1, 1.35], [2.16, 0.16, 0, 2.7]]) {
+    const m = new THREE.Mesh(new THREE.BoxGeometry(w, h, 0.12), eGlow);
+    m.position.set(x, y, 0);
+    exit.add(m);
+  }
+  const exitSign = textSprite('יציאה לרחוב', { size: 54, scale: 1.3 });
+  exitSign.position.set(0, 3.4, 0.2);
+  exit.add(exitSign);
+  hall.add(exit);
+  const exitPos = new THREE.Vector3(0, 0, HD - 1.4);
+  const hallBlocked = (x, z) => Math.abs(x) > HW - BODY - 0.1 || Math.abs(z) > HD - BODY - 0.1 || tables.some(([tx, tz]) => Math.hypot(x - tx, z - tz) < 1.95);
+
+  // ----- Player -----
+  const player = makeCharacter();
+  let mode = 'street';
+  let scene = street;
+  const spawnStreet = () => {
+    let d = 13;
+    let p = door.clone().add(new THREE.Vector3(out.x * d, 0, out.y * d));
+    while (blockedAt(p.x, p.z) && d > 4) { d -= 1.5; p = door.clone().add(new THREE.Vector3(out.x * d, 0, out.y * d)); }
+    return p;
+  };
+  player.position.copy(spawnStreet());
+  player.rotation.y = facing + Math.PI;
+  street.add(player);
+  // The camera sits at player + dir(yaw) and looks back at the player, so yaw = facing puts it
+  // on the street side looking toward the door.
+  let yaw = facing;
+  let pitch = 0.32;
+  let camDist = 7;
+  let cooldown = 0;
+
+  const goHall = () => {
+    mode = 'hall';
+    scene = hall;
+    hall.add(player);
+    player.position.set(0, 0, HD - 4.5);
+    player.rotation.y = Math.PI;
+    yaw = 0;
+    cooldown = 1.2;
+    flash();
+  };
+  const goStreet = () => {
+    mode = 'street';
+    scene = street;
+    street.add(player);
+    player.position.copy(door).add(new THREE.Vector3(out.x * 4, 0, out.y * 4));
+    player.rotation.y = facing;
+    yaw = facing + Math.PI;
+    cooldown = 1.2;
+    flash();
+  };
+  const flash = () => {
+    root.classList.remove('st-flash');
+    void root.offsetWidth;
+    root.classList.add('st-flash');
+  };
+
+  // ----- Input -----
+  const keys = new Set();
+  const joy = { x: 0, y: 0, id: null };
+  const onKey = (e) => {
+    if (e.type === 'keydown') {
+      if (e.code === 'Escape') { if (!$('.st-photo').hidden) closePhoto(); return; }
+      if (e.code === 'KeyE' && near) { openPhoto(near); return; }
+      keys.add(e.code);
+    } else keys.delete(e.code);
+  };
+  window.addEventListener('keydown', onKey);
+  window.addEventListener('keyup', onKey);
+
+  const canvas = $('.st-canvas');
+  let drag = null;
+  canvas.addEventListener('pointerdown', (e) => {
+    drag = { id: e.pointerId, x: e.clientX, y: e.clientY, sx: e.clientX, sy: e.clientY };
+    canvas.setPointerCapture(e.pointerId);
+  });
+  canvas.addEventListener('pointermove', (e) => {
+    if (!drag || drag.id !== e.pointerId) return;
+    yaw -= (e.clientX - drag.x) * 0.006;
+    pitch = Math.max(0.05, Math.min(1.1, pitch + (e.clientY - drag.y) * 0.004));
+    drag.x = e.clientX; drag.y = e.clientY;
+  });
+  const ray = new THREE.Raycaster();
+  canvas.addEventListener('pointerup', (e) => {
+    if (drag && Math.hypot(e.clientX - drag.sx, e.clientY - drag.sy) < 8) {
+      const r = canvas.getBoundingClientRect();
+      ray.setFromCamera(new THREE.Vector2(((e.clientX - r.left) / r.width) * 2 - 1, -((e.clientY - r.top) / r.height) * 2 + 1), camera);
+      const hit = ray.intersectObjects(pickables.filter((m) => isIn(m, scene)), false)[0];
+      if (hit && hit.distance < 30) openPhoto(hit.object.userData.photo);
+    }
+    drag = null;
+  });
+  const isIn = (o, sc) => { while (o) { if (o === sc) return true; o = o.parent; } return false; };
+  canvas.addEventListener('wheel', (e) => { camDist = Math.max(3, Math.min(16, camDist + e.deltaY * 0.01)); }, { passive: true });
+
+  const joyEl = $('.st-joy'), knob = $('.st-knob');
+  joyEl.addEventListener('pointerdown', (e) => { joy.id = e.pointerId; joyEl.setPointerCapture(e.pointerId); moveJoy(e); });
+  joyEl.addEventListener('pointermove', (e) => { if (e.pointerId === joy.id) moveJoy(e); });
+  const endJoy = () => { joy.id = null; joy.x = joy.y = 0; knob.style.transform = ''; };
+  joyEl.addEventListener('pointerup', endJoy);
+  joyEl.addEventListener('pointercancel', endJoy);
+  function moveJoy(e) {
+    const r = joyEl.getBoundingClientRect();
+    let dx = e.clientX - (r.left + r.width / 2), dy = e.clientY - (r.top + r.height / 2);
+    const m = Math.hypot(dx, dy), max = r.width / 2 - 18;
+    if (m > max) { dx = (dx / m) * max; dy = (dy / m) * max; }
+    joy.x = dx / max; joy.y = dy / max;
+    knob.style.transform = `translate(${dx}px, ${dy}px)`;
+  }
+
+  // ----- Photo overlay -----
+  let viewing = null;
+  function openPhoto(p) {
+    viewing = p;
+    $('.st-photo img').src = p.full;
+    $('.st-photo b').textContent = p.place || place || '';
+    $('.st-photo span').textContent = p.date ? dateFmt.format(p.date) : '';
+    $('.st-photo').hidden = false;
+  }
+  function closePhoto() { viewing = null; $('.st-photo').hidden = true; }
+  root.addEventListener('click', (e) => {
+    const act = e.target.closest('[data-act]')?.dataset.act;
+    if (act === 'close-photo') closePhoto();
+    if (act === 'exit') stop();
+  });
+  $('.st-photo').addEventListener('click', (e) => { if (e.target === $('.st-photo')) closePhoto(); });
+
+  // ----- Loop -----
+  const resize = () => {
+    const w = root.clientWidth, h = root.clientHeight;
+    renderer.setSize(w, h, false);
+    camera.aspect = w / h;
+    camera.updateProjectionMatrix();
+  };
+  window.addEventListener('resize', resize);
+  resize();
+
+  let near = null;
+  let running = true;
+  let last = performance.now();
+  const camPos = new THREE.Vector3();
+  const tmp = new THREE.Vector3();
+  const pickFrames = () => pickables.filter((m) => m.geometry.type === 'PlaneGeometry' && isIn(m, scene));
+
+  function step(now) {
+    if (!running) return;
+    requestAnimationFrame(step);
+    const dt = Math.min(0.05, (now - last) / 1000);
+    last = now;
+    cooldown = Math.max(0, cooldown - dt);
+
+    // Movement relative to the camera.
+    let ix = 0, iz = 0;
+    if (!viewing) {
+      if (keys.has('KeyW') || keys.has('ArrowUp')) iz -= 1;
+      if (keys.has('KeyS') || keys.has('ArrowDown')) iz += 1;
+      if (keys.has('KeyA') || keys.has('ArrowLeft')) ix -= 1;
+      if (keys.has('KeyD') || keys.has('ArrowRight')) ix += 1;
+      ix += joy.x; iz += joy.y;
+    }
+    const mag = Math.min(1, Math.hypot(ix, iz));
+    const run = keys.has('ShiftLeft') || keys.has('ShiftRight') || Math.hypot(joy.x, joy.y) > 0.92;
+    const speed = mag * (run ? 8.5 : 4.2);
+    if (mag > 0.05) {
+      const fx = -Math.sin(yaw), fz = -Math.cos(yaw); // camera forward on the ground
+      const rx = -fz, rz = fx;
+      const mx = (rx * ix - fx * iz) / (mag || 1), mz = (rz * ix - fz * iz) / (mag || 1);
+      const nx = player.position.x + mx * speed * dt, nz = player.position.z + mz * speed * dt;
+      const hit = mode === 'street' ? blockedAt : hallBlocked;
+      if (!hit(nx, nz)) player.position.set(nx, 0, nz);
+      else if (!hit(nx, player.position.z)) player.position.x = nx;
+      else if (!hit(player.position.x, nz)) player.position.z = nz;
+      const target = Math.atan2(mx, mz);
+      let d = target - player.rotation.y;
+      d = Math.atan2(Math.sin(d), Math.cos(d));
+      player.rotation.y += d * Math.min(1, dt * 12);
+    }
+    animateCharacter(player, speed, dt);
+
+    // Doors.
+    if (cooldown === 0) {
+      if (mode === 'street' && Math.hypot(player.position.x - markerPos.x, player.position.z - markerPos.z) < 1.1) goHall();
+      else if (mode === 'hall' && Math.hypot(player.position.x - exitPos.x, player.position.z - exitPos.z) < 1.0) goStreet();
+    }
+    marker.material.opacity = 0.25 + 0.15 * Math.sin(now / 300);
+    marker.rotation.y += dt;
+
+    // Nearest photo for the prompt.
+    near = null;
+    let nd = 3.6;
+    for (const m of pickFrames()) {
+      m.getWorldPosition(tmp);
+      const d = Math.hypot(tmp.x - player.position.x, tmp.z - player.position.z);
+      if (d < nd) { nd = d; near = m.userData.photo; }
+    }
+    const prompt = $('.st-prompt');
+    const doorDist = mode === 'street' ? Math.hypot(player.position.x - markerPos.x, player.position.z - markerPos.z) : Infinity;
+    if (near && !viewing) { prompt.textContent = isTouch ? '📸 הקישו על התמונה להגדלה' : '📸 E להגדלת התמונה'; prompt.hidden = false; }
+    else if (doorDist < 7 && !viewing) { prompt.textContent = '✨ היכנסו לעיגול המואר כדי להיכנס לאירוע'; prompt.hidden = false; }
+    else prompt.hidden = true;
+
+    // Third-person camera; pulled in so it never sits inside a building or outside the hall.
+    const head = player.position.clone().add(new THREE.Vector3(0, 1.6, 0));
+    let dist = camDist;
+    const dir = new THREE.Vector3(Math.sin(yaw) * Math.cos(pitch), Math.sin(pitch), Math.cos(yaw) * Math.cos(pitch));
+    for (; dist > 1.2; dist -= 0.4) {
+      tmp.copy(head).addScaledVector(dir, dist);
+      const bad = mode === 'street'
+        ? solids.some((b) => tmp.y < b.h + 0.5 && tmp.x > b.box[0] && tmp.x < b.box[2] && tmp.z > b.box[1] && tmp.z < b.box[3] && inPoly(tmp.x, tmp.z, b.pts))
+        : Math.abs(tmp.x) > HW - 0.3 || Math.abs(tmp.z) > HD - 0.3 || tmp.y > HH - 0.3;
+      if (!bad) break;
+    }
+    camPos.copy(head).addScaledVector(dir, dist);
+    camera.position.lerp(camPos, Math.min(1, dt * 10));
+    camera.lookAt(head);
+
+    if (mode === 'street' && renderer.shadowMap.enabled) {
+      sun.position.set(player.position.x - 60, 120, player.position.z + 40);
+      sun.target.position.copy(player.position);
+    }
+    renderer.render(scene, camera);
+  }
+
+  function stop() {
+    if (!running) return;
+    running = false;
+    window.removeEventListener('keydown', onKey);
+    window.removeEventListener('keyup', onKey);
+    window.removeEventListener('resize', resize);
+    for (const sc of [street, hall]) {
+      sc.traverse((o) => {
+        o.geometry?.dispose();
+        const mats = Array.isArray(o.material) ? o.material : o.material ? [o.material] : [];
+        mats.forEach((m) => { m.map?.dispose(); m.dispose(); });
+      });
+    }
+    renderer.dispose();
+    root.innerHTML = '';
+    onExit?.();
+  }
+
+  camera.position.copy(player.position).add(new THREE.Vector3(Math.sin(yaw) * 7, 40, Math.cos(yaw) * 7));
+  $('.st-loading').classList.add('done');
+  requestAnimationFrame(step);
+  return { stop, debug: { player, get mode() { return mode; }, markerPos, door, out } };
+}

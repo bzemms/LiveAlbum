@@ -176,6 +176,7 @@ function open(i, { fly = false } = {}) {
   $('viewer-date').textContent = p.date ? dateFmt.format(p.date) : '';
   $('v-count').textContent = `${i + 1} / ${state.photos.length}`;
   $('v-locate').textContent = p.lat == null ? '📍 הוסף מיקום' : '📍 שנה מיקום';
+  $('v-street').hidden = p.lat == null;
   $('viewer').hidden = false;
   highlight();
   if (fly && p.lat != null) {
@@ -189,6 +190,51 @@ function close() {
   highlight();
 }
 $('v-close').addEventListener('click', () => { stopTour(); close(); });
+
+// ---------- Down to the street ----------
+// The globe is how you travel; the place itself is a 3D street you walk through.
+let streetSession = null;
+async function goStreet(photo) {
+  if (streetSession || photo?.lat == null) return;
+  stopTour();
+  close();
+  stopSpin();
+  const group = state.photos.filter((p) => p.lat != null && keyOf(p) === keyOf(photo));
+  globe.pointOfView({ lat: photo.lat, lng: photo.lng, altitude: 0.02 }, 2200);
+  const modP = import('./street/street.js');
+  await sleep(1900);
+  $('dive').hidden = false;
+  await sleep(450);
+  const { enterStreet } = await modP;
+  $('street').hidden = false;
+  document.body.classList.add('in-street');
+  globe.pauseAnimation();
+  streetSession = await enterStreet({
+    root: $('street'),
+    photos: group,
+    place: photo.place,
+    lat: photo.lat,
+    lng: photo.lng,
+    onExit: () => {
+      streetSession = null;
+      $('street').hidden = true;
+      document.body.classList.remove('in-street');
+      globe.resumeAnimation();
+      globe.pointOfView({ lat: photo.lat, lng: photo.lng, altitude: 0.02 });
+      globe.pointOfView({ lat: photo.lat, lng: photo.lng, altitude: 0.5 }, 2000);
+    },
+  }).catch((e) => {
+    console.error(e);
+    $('street').hidden = true;
+    document.body.classList.remove('in-street');
+    globe.resumeAnimation();
+    toast('לא הצלחנו לבנות את הרחוב. נסו שוב.');
+    return null;
+  });
+  $('dive').hidden = true;
+  window.__street = streetSession; // handy for debugging in the console
+}
+$('v-street').addEventListener('click', () => goStreet(state.photos[state.current]));
 
 // ---------- Placing photos by hand ----------
 // Photos shared through chat apps lose their location. Let people search for the place
