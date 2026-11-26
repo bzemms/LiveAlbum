@@ -988,7 +988,8 @@ export async function enterStreet({ root, photos, place, lat, lng, onExit }) {
         mode = 'photo';
         scene = dio.scene;
         scene.add(player);
-        player.position.set(0, 0, dio.depth + 3.2);
+        // Portrait screens see less width: stand further back so the whole picture fits.
+        player.position.set(0, 0, dio.depth + (root.clientHeight > root.clientWidth ? 6 : 3.2));
         player.rotation.y = Math.PI;
         yaw = 0;
         pitch = 0.12;

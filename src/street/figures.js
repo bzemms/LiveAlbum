@@ -62,17 +62,12 @@ function components(mask, w, h) {
   return { out, lab };
 }
 
-const cache = new Map();
-
-/**
- * Cut the people out of a photo.
- * Returns [{ canvas, aspect, cut }] — `cut` is true when the person runs off the bottom of the photo.
- */
-export async function peopleFrom(photo, max = 5) {
-  if (cache.has(photo.full)) return cache.get(photo.full);
+// One segmentation per photo, shared by the cardboard figures and the light depth.
+const segCache = new Map();
+export function segmentPhoto(photo) {
+  if (segCache.has(photo.full)) return segCache.get(photo.full);
   const job = (async () => {
     const [seg, img] = await Promise.all([segmenter(), loadImage(photo.full)]);
-    // Segment a moderate-size copy; the model works at low resolution internally anyway.
     const scale = Math.min(1, 640 / Math.max(img.width, img.height));
     const W = Math.round(img.width * scale), H = Math.round(img.height * scale);
     const small = document.createElement('canvas');
@@ -85,8 +80,24 @@ export async function peopleFrom(photo, max = 5) {
     const mask = new Uint8Array(mw * mh);
     for (let i = 0; i < mask.length; i++) mask[i] = data[i] === PERSON ? 1 : 0;
     res.close();
-
     const { out, lab } = components(mask, mw, mh);
+    return { img, mw, mh, mask, comps: out, lab };
+  })();
+  segCache.set(photo.full, job);
+  job.catch(() => segCache.delete(photo.full));
+  return job;
+}
+
+const cache = new Map();
+
+/**
+ * Cut the people out of a photo.
+ * Returns [{ canvas, aspect, cut }] — `cut` is true when the person runs off the bottom of the photo.
+ */
+export async function peopleFrom(photo, max = 5) {
+  if (cache.has(photo.full)) return cache.get(photo.full);
+  const job = (async () => {
+    const { img, mw, mh, comps: out, lab } = await segmentPhoto(photo);
     const people = out
       .filter((c) => c.area > mw * mh * 0.012 && c.maxY - c.minY > mh * 0.14)
       .sort((a, b) => b.area - a.area)
