@@ -41,11 +41,10 @@ You see an album, its members, its media and its files only if you are a member 
 
 ## Running the access-rule tests
 
-Against a scratch database with the migration applied (a throwaway Supabase project, or a local
-Postgres with the small stand-ins for `auth` and `storage` described at the top of the test file):
+The whole test runs in one transaction that is rolled back, so it leaves no users or albums behind.
 
-```bash
-psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f supabase/tests/rls_test.sql
-```
-
-It stops at the first failed check and ends with `ALL RLS TESTS PASSED`.
+- **Supabase SQL editor:** paste `tests/rls_test.sql` and Run. The result is `ALL RLS TESTS PASSED`,
+  or an error naming the first check that failed.
+- **psql:** `psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f supabase/tests/rls_test.sql`
+- **Plain Postgres** (no Supabase): first create the small stand-ins for `auth` and `storage`
+  described at the top of the test file.

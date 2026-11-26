@@ -6,8 +6,10 @@
 -- and storage.buckets/storage.objects (RLS on) with storage.foldername().
 -- Users: alice (album owner), bob (family member, invited), carol (a stranger), and anon.
 
-\set ON_ERROR_STOP 1
-set client_min_messages = notice;
+-- Everything runs in one transaction that is rolled back at the end, so it can run in the Supabase
+-- SQL editor against a real project without leaving test users or albums behind.
+begin;
+set local client_min_messages = notice;
 
 create or replace function pg_temp.ok(cond boolean, msg text) returns void language plpgsql as $$
 begin
@@ -155,4 +157,5 @@ delete from public.albums where id = 'aaaaaaaa-0000-0000-0000-000000000001';
 reset role;
 select pg_temp.ok((select count(*) from public.media) = 0, 'deleting an album deletes its media rows');
 
-\echo ALL RLS TESTS PASSED
+select 'ALL RLS TESTS PASSED' as result;
+rollback;
