@@ -207,3 +207,26 @@ body.in-street .panel, body.in-street .brand, body.in-street .credit, body.in-st
 .st-spinner { width: 38px; height: 38px; border-radius: 50%; border: 4px solid #cfdbe6; border-top-color: #1d2b38; animation: spin 0.9s linear infinite; }
 @keyframes spin { to { transform: rotate(360deg); } }
 @media (max-width: 760px) { .st-help { font-size: 0.7rem; } .st-place b { font-size: 0.92rem; } }
+
+.st-radar {
+  position: absolute; right: calc(14px + env(safe-area-inset-right, 0px)); bottom: calc(52px + env(safe-area-inset-bottom, 0px));
+  display: flex; flex-direction: column; align-items: center; gap: 8px; pointer-events: none;
+}
+.st-map { width: 170px; height: 170px; border-radius: 50%; box-shadow: 0 6px 20px rgba(0, 0, 0, 0.45); }
+.st-count {
+  background: rgba(10, 14, 22, 0.82); color: var(--gold); font-weight: 700; font-size: 0.85rem;
+  padding: 6px 12px; border-radius: 999px; border: 1px solid rgba(255, 214, 120, 0.45); white-space: nowrap;
+}
+.st-toast {
+  position: absolute; left: 50%; top: calc(76px + env(safe-area-inset-top, 0px)); transform: translateX(-50%);
+  background: var(--gold); color: var(--gold-ink); font-family: var(--f-display); font-weight: 700; font-size: 1.05rem;
+  padding: 10px 20px; border-radius: 12px; box-shadow: 0 8px 26px rgba(0, 0, 0, 0.4); white-space: nowrap; max-width: calc(100vw - 32px);
+  animation: st-pop 0.35s ease; pointer-events: none;
+}
+@keyframes st-pop { from { transform: translateX(-50%) scale(0.85); opacity: 0; } }
+@media (max-width: 760px) {
+  .st-map { width: 120px; height: 120px; }
+  .st-radar { bottom: calc(60px + env(safe-area-inset-bottom, 0px)); }
+  .st-toast { font-size: 0.9rem; white-space: normal; text-align: center; }
+  .st-prompt { bottom: calc(200px + env(safe-area-inset-bottom, 0px)); }
+}

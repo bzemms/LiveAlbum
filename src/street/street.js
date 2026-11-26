@@ -4,6 +4,8 @@
 import * as THREE from 'three';
 import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js';
 import { loadArea } from './osm.js';
+import { makeGrid } from './navgrid.js';
+import { makeMinimap } from './minimap.js';
 
 const DAY = {
   sky: 0xa9d3f0, fog: 0xc9e2f2, ground: 0xd8d2c4, road: 0x55595f, foot: 0xc2bba9,
@@ -164,6 +166,8 @@ export async function enterStreet({ root, photos, place, lat, lng, onExit }) {
       <div class="st-place"><b></b><span></span></div>
     </div>
     <div class="st-prompt" hidden></div>
+    <div class="st-radar"><div class="st-count" hidden></div><canvas class="st-map"></canvas></div>
+    <div class="st-toast" hidden></div>
     <div class="st-help">${isTouch ? 'ג׳ויסטיק להליכה · גרירה לסיבוב המצלמה · הקשה על תמונה להגדלה' : 'WASD או חצים להליכה · Shift לריצה · גרירה לסיבוב · E או לחיצה על תמונה להגדלה'}</div>
     <div class="st-joy" ${isTouch ? '' : 'hidden'}><div class="st-knob"></div></div>
     <div class="st-photo" hidden><figure><img alt=""><figcaption><b></b><span></span></figcaption></figure><button class="st-btn" data-act="close-photo">✕ סגור</button></div>
@@ -374,13 +378,54 @@ export async function enterStreet({ root, photos, place, lat, lng, onExit }) {
       if (clear) easelSpots.push({ x, z, side });
     }
   }
-  streetPhotos.slice(0, easelSpots.length).forEach((p, i) => {
-    const { x: ex, z: ez, side } = easelSpots[i];
+  // A game of finding memories: a couple of photos wait at the door, the rest are scattered
+  // along nearby streets, each marked by a beam of light you can see over the roofs.
+  const clearAt = (x, z, r) => !solids.some((b) => x > b.box[0] - r && x < b.box[2] + r && z > b.box[1] - r && z < b.box[3] + r && (inPoly(x, z, b.pts) || closestOnPoly(x, z, b.pts).d < r));
+  const nearCount = Math.min(easelSpots.length, streetPhotos.length <= 3 ? 1 : 2);
+  const roadSpots = [];
+  for (const r of area.roads) {
+    for (let i = 0; i < r.pts.length - 1; i++) {
+      const [ax, az] = r.pts[i], [bx, bz] = r.pts[i + 1];
+      const len = Math.hypot(bx - ax, bz - az);
+      for (let t = 4; t < len - 2; t += 7) {
+        const x = ax + ((bx - ax) * t) / len, z = az + ((bz - az) * t) / len;
+        const d = Math.hypot(x - door.x, z - door.z);
+        if (d > 22 && d < 85 && clearAt(x, z, 2.5)) roadSpots.push({ x, z, d, dir: Math.atan2(bx - ax, bz - az) });
+      }
+    }
+  }
+  // Spread them out: each next spot is the one farthest from those already taken (within reach).
+  const scattered = [];
+  const want = streetPhotos.length - nearCount;
+  roadSpots.sort((a, b) => a.d - b.d);
+  while (scattered.length < want && roadSpots.length) {
+    let best = null, bestScore = -1;
+    for (const c of roadSpots) {
+      const gap = Math.min(Math.hypot(c.x - door.x, c.z - door.z), ...scattered.map((q) => Math.hypot(c.x - q.x, c.z - q.z)));
+      const score = Math.min(gap, 40) - c.d * 0.15;
+      if (score > bestScore) { bestScore = score; best = c; }
+    }
+    scattered.push(best);
+    roadSpots.splice(roadSpots.indexOf(best), 1);
+  }
+  const memories = [];
+  const beamGeo = new THREE.CylinderGeometry(0.55, 0.55, 40, 16, 1, true);
+  beamGeo.translate(0, 20, 0);
+  const spots = [
+    ...easelSpots.slice(0, nearCount).map((e) => ({ x: e.x, z: e.z, rot: facing + e.side * 0.32 })),
+    ...scattered.map((q) => ({ x: q.x, z: q.z, rot: Math.atan2(door.x - q.x, door.z - q.z) })),
+  ];
+  streetPhotos.slice(0, spots.length).forEach((p, i) => {
+    const { x: ex, z: ez, rot } = spots[i];
     const { group, pick } = photoFrame(p, 2.3, { loader });
     group.position.set(ex, 2.35, ez);
-    group.rotation.y = facing + side * 0.32;
+    group.rotation.y = rot;
     street.add(group);
     pickables.push(...pick);
+    const beam = new THREE.Mesh(beamGeo, new THREE.MeshBasicMaterial({ color: 0xffd34d, transparent: true, opacity: 0.22, depthWrite: false, blending: THREE.AdditiveBlending, side: THREE.DoubleSide }));
+    beam.position.set(ex, 0, ez);
+    street.add(beam);
+    memories.push({ x: ex, z: ez, photo: p, found: false, beam });
     if (night) {
       const l = new THREE.PointLight(0xffd9a0, 6, 7, 1.6);
       l.position.set(group.position.x + out.x * 1.2, 3.4, group.position.z + out.y * 1.2);
@@ -554,12 +599,35 @@ export async function enterStreet({ root, photos, place, lat, lng, onExit }) {
   let yaw = Math.atan2(player.position.x - door.x, player.position.z - door.z);
   player.rotation.y = yaw + Math.PI;
   street.add(player);
+
+  // Walkable grid for the route, the chevrons that draw it on the street, and the radar.
+  const grid = makeGrid(R, 2.5, (x, z) => !clearAt(x, z, 0.9));
+  const chevShape = new THREE.Shape([new THREE.Vector2(-0.55, -0.3), new THREE.Vector2(0, 0.35), new THREE.Vector2(0.55, -0.3), new THREE.Vector2(0.55, -0.05), new THREE.Vector2(0, 0.6), new THREE.Vector2(-0.55, -0.05)].map((v) => v));
+  const chevGeo = new THREE.ShapeGeometry(chevShape);
+  chevGeo.rotateX(-Math.PI / 2);
+  const chevMat = new THREE.MeshBasicMaterial({ color: 0xffd34d, transparent: true, opacity: 0.9, depthWrite: false });
+  const MAXCHEV = 90;
+  const chevrons = new THREE.InstancedMesh(chevGeo, chevMat, MAXCHEV);
+  chevrons.count = 0;
+  chevrons.frustumCulled = false;
+  street.add(chevrons);
+  const drawMap = makeMinimap($('.st-map'), { radius: R, buildings: solids, roads: area.roads, night });
+  let route = null, routeAt = -1, routeFrom = new THREE.Vector3(1e9, 0, 0);
+  const target = () => memories.find((m) => !m.found) || { x: markerPos.x, z: markerPos.z, door: true };
+  const updateCount = () => {
+    const n = memories.filter((m) => m.found).length;
+    $('.st-count').textContent = memories.length ? `📸 זכרונות שנמצאו ${n}/${memories.length}` : '';
+    $('.st-count').hidden = !memories.length;
+  };
+  updateCount();
+  let allFoundShown = false;
   let pitch = 0.32;
   let camDist = 7;
   let cooldown = 1.5;
 
   const goHall = () => {
     mode = 'hall';
+    $('.st-radar').hidden = true;
     scene = hall;
     hall.add(player);
     player.position.set(0, 0, HD - 4.5);
@@ -570,6 +638,7 @@ export async function enterStreet({ root, photos, place, lat, lng, onExit }) {
   };
   const goStreet = () => {
     mode = 'street';
+    $('.st-radar').hidden = false;
     scene = street;
     street.add(player);
     player.position.copy(door).add(new THREE.Vector3(out.x * 4, 0, out.y * 4));
@@ -639,7 +708,27 @@ export async function enterStreet({ root, photos, place, lat, lng, onExit }) {
 
   // ----- Photo overlay -----
   let viewing = null;
+  let toastTimer = 0;
+  function showToast(msg, ms = 3500) {
+    const t = $('.st-toast');
+    t.textContent = msg;
+    t.hidden = false;
+    clearTimeout(toastTimer);
+    toastTimer = setTimeout(() => (t.hidden = true), ms);
+  }
+  function markFound(m) {
+    if (m.found) return;
+    m.found = true;
+    m.beam.visible = false;
+    updateCount();
+    const left = memories.filter((q) => !q.found).length;
+    if (left) showToast(`✨ מצאתם זיכרון! נשארו עוד ${left}`);
+    else if (!allFoundShown) { allFoundShown = true; showToast('🎉 מצאתם את כל הזכרונות! עכשיו לאירוע, החץ מראה את הדרך', 5000); }
+    routeAt = -1;
+  }
   function openPhoto(p) {
+    const m = memories.find((q) => q.photo === p);
+    if (m && mode === 'street') markFound(m);
     viewing = p;
     $('.st-photo img').src = p.full;
     $('.st-photo b').textContent = p.place || place || '';
@@ -705,6 +794,43 @@ export async function enterStreet({ root, photos, place, lat, lng, onExit }) {
       player.rotation.y += d * Math.min(1, dt * 12);
     }
     animateCharacter(player, speed, dt);
+
+    // Memories: found by walking up to them; the route then leads to the next one, then the door.
+    if (mode === 'street') {
+      for (const m of memories) {
+        if (!m.found && Math.hypot(m.x - player.position.x, m.z - player.position.z) < 4) markFound(m);
+        if (!m.found) m.beam.material.opacity = 0.16 + 0.1 * Math.sin(now / 400 + m.x);
+      }
+      const t = target();
+      if (now - routeAt > 500 && (player.position.distanceTo(routeFrom) > 1.5 || now - routeAt > 3000)) {
+        route = grid.path(player.position.x, player.position.z, t.x, t.z);
+        routeAt = now;
+        routeFrom.copy(player.position);
+      }
+      // Chevrons every 2.2 m along the route, drifting forward.
+      let n = 0;
+      if (route && Math.hypot(t.x - player.position.x, t.z - player.position.z) > 3) {
+        const pts = [[player.position.x, player.position.z], ...route.slice(1)];
+        let carry = 1.6 + ((now / 900) % 1) * 2.2;
+        for (let q = 0; q < pts.length - 1 && n < MAXCHEV; q++) {
+          const [ax, az] = pts[q], [bx, bz] = pts[q + 1];
+          const len = Math.hypot(bx - ax, bz - az);
+          const ang = Math.atan2(bx - ax, bz - az);
+          for (; carry < len && n < MAXCHEV; carry += 2.2) {
+            dummy.position.set(ax + ((bx - ax) * carry) / len, 0.06, az + ((bz - az) * carry) / len);
+            dummy.rotation.set(0, ang + Math.PI, 0);
+            dummy.scale.setScalar(1);
+            dummy.updateMatrix();
+            chevrons.setMatrixAt(n++, dummy.matrix);
+          }
+          carry -= len;
+        }
+      }
+      chevrons.count = n;
+      chevrons.instanceMatrix.needsUpdate = true;
+      chevMat.opacity = 0.65 + 0.3 * Math.sin(now / 250);
+      drawMap({ x: player.position.x, z: player.position.z, yaw, route, memories, door: { x: markerPos.x, z: markerPos.z } });
+    }
 
     // Doors.
     if (cooldown === 0) {
@@ -780,5 +906,5 @@ export async function enterStreet({ root, photos, place, lat, lng, onExit }) {
   camera.position.copy(player.position).add(new THREE.Vector3(Math.sin(yaw) * 7, 40, Math.cos(yaw) * 7));
   $('.st-loading').classList.add('done');
   requestAnimationFrame(step);
-  return { stop, debug: { player, camera, solids, venue, get mode() { return mode; }, markerPos, door, out } };
+  return { stop, debug: { player, camera, solids, venue, memories, get mode() { return mode; }, markerPos, door, out } };
 }
