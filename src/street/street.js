@@ -7,6 +7,7 @@ import { loadArea } from './osm.js';
 import { makeGrid } from './navgrid.js';
 import { makeMinimap } from './minimap.js';
 import { peopleFrom } from './figures.js';
+import { depthOf } from './depth.js';
 
 const DAY = {
   sky: 0xa9d3f0, fog: 0xc9e2f2, ground: 0xd8d2c4, road: 0x55595f, foot: 0xc2bba9,
@@ -203,7 +204,7 @@ export async function enterStreet({ root, photos, place, lat, lng, onExit }) {
   root.innerHTML = `
     <canvas class="st-canvas"></canvas>
     <div class="st-top">
-      <button class="st-btn" data-act="exit">🌍 חזרה לגלובוס</button>
+      <div class="st-actions"><button class="st-btn" data-act="exit">🌍 חזרה לגלובוס</button><button class="st-btn gold" data-act="leave-photo" hidden>↩ יציאה מהתמונה</button></div>
       <div class="st-place"><b></b><span></span></div>
     </div>
     <div class="st-prompt" hidden></div>
@@ -212,7 +213,7 @@ export async function enterStreet({ root, photos, place, lat, lng, onExit }) {
     <div class="st-status" hidden></div>
     <div class="st-help">${isTouch ? 'ג׳ויסטיק להליכה · גרירה לסיבוב המצלמה · הקשה על תמונה להגדלה' : 'WASD או חצים להליכה · Shift לריצה · גרירה לסיבוב · E או לחיצה על תמונה להגדלה'}</div>
     <div class="st-joy" ${isTouch ? '' : 'hidden'}><div class="st-knob"></div></div>
-    <div class="st-photo" hidden><figure><img alt=""><figcaption><b></b><span></span></figcaption></figure><button class="st-btn" data-act="close-photo">✕ סגור</button></div>
+    <div class="st-photo" hidden><figure><img alt=""><figcaption><b></b><span></span></figcaption></figure><div class="st-photo-actions"><button class="st-btn gold" data-act="enter-photo">🔮 היכנסו לתמונה</button><button class="st-btn" data-act="close-photo">✕ סגור</button></div></div>
     <div class="st-loading"><div class="st-spinner"></div><div>יורדים לרחוב…</div></div>`;
   const $ = (s) => root.querySelector(s);
   $('.st-place b').textContent = place || 'המקום';
@@ -755,8 +756,9 @@ export async function enterStreet({ root, photos, place, lat, lng, onExit }) {
   const joy = { x: 0, y: 0, id: null };
   const onKey = (e) => {
     if (e.type === 'keydown') {
-      if (e.code === 'Escape') { if (!$('.st-photo').hidden) closePhoto(); return; }
+      if (e.code === 'Escape') { if (!$('.st-photo').hidden) closePhoto(); else if (mode === 'photo') leavePhoto(); return; }
       if (e.code === 'KeyE' && near) { openPhoto(near); return; }
+      if (e.code === 'KeyQ' && near && mode !== 'photo') { enterPhoto(near); return; }
       keys.add(e.code);
     } else keys.delete(e.code);
   };
@@ -833,9 +835,116 @@ export async function enterStreet({ root, photos, place, lat, lng, onExit }) {
     $('.st-photo').hidden = false;
   }
   function closePhoto() { viewing = null; $('.st-photo').hidden = true; }
+
+  // ----- Inside a photo: the picture becomes a relief you can walk around (AI depth) -----
+  const dio = { scene: null, photo: null, depth: 2, w: 8, back: null, busy: false };
+  const photoBlocked = (x, z) => Math.abs(x) > dio.w / 2 + 2.5 || z < dio.depth + 0.6 || z > dio.depth + 11;
+  const texOf = (url) => new Promise((res, rej) => loader.load(url, (t) => { t.colorSpace = THREE.SRGBColorSpace; res(t); }, undefined, rej));
+  function buildDiorama(depth, tex) {
+    const sc = new THREE.Scene();
+    sc.background = new THREE.Color(0x070a12);
+    sc.fog = new THREE.Fog(0x070a12, 16, 34);
+    sc.add(new THREE.HemisphereLight(0xffffff, 0x2a2c3a, 1.6));
+    const key = new THREE.DirectionalLight(0xfff1dc, 1.6);
+    key.position.set(3, 8, 12);
+    sc.add(key);
+    const aspect = depth.width / depth.height;
+    let W = 9, H = W / aspect;
+    if (H > 6.5) { H = 6.5; W = H * aspect; }
+    const D = Math.min(W, H) * 0.45;
+    const segX = 240, segY = Math.max(8, Math.round(segX / aspect));
+    const geo = new THREE.PlaneGeometry(W, H, segX, segY);
+    // Light blur of the depth so edges stretch smoothly instead of tearing.
+    const { data, width: dw, height: dh, channels: ch } = depth;
+    const at = (cx, cy) => data[(Math.min(dh - 1, Math.max(0, cy)) * dw + Math.min(dw - 1, Math.max(0, cx))) * ch] / 255;
+    const pos = geo.attributes.position;
+    const r = Math.max(1, Math.round(dw / segX));
+    for (let i = 0; i < pos.count; i++) {
+      const u = pos.getX(i) / W + 0.5, v = 0.5 - pos.getY(i) / H;
+      const cx = Math.round(u * (dw - 1)), cy = Math.round(v * (dh - 1));
+      let sum = 0, n = 0;
+      for (let oy = -r; oy <= r; oy += r) for (let ox = -r; ox <= r; ox += r) { sum += at(cx + ox, cy + oy); n++; }
+      pos.setZ(i, (sum / n) * D);
+    }
+    geo.computeVertexNormals();
+    const relief = new THREE.Mesh(geo, new THREE.MeshBasicMaterial({ map: tex, side: THREE.DoubleSide }));
+    relief.position.y = H / 2 + 0.05;
+    sc.add(relief);
+    const floor = new THREE.Mesh(new THREE.CircleGeometry(18, 48), new THREE.MeshLambertMaterial({ color: 0x141826 }));
+    floor.rotation.x = -Math.PI / 2;
+    sc.add(floor);
+    // Drifting specks of light, for the feeling of being inside a memory.
+    const N = 500, pp = new Float32Array(N * 3);
+    for (let i = 0; i < N; i++) { pp[i * 3] = (Math.random() - 0.5) * W * 1.6; pp[i * 3 + 1] = Math.random() * H * 1.3; pp[i * 3 + 2] = Math.random() * (D + 9); }
+    const pg = new THREE.BufferGeometry();
+    pg.setAttribute('position', new THREE.BufferAttribute(pp, 3));
+    const specks = new THREE.Points(pg, new THREE.PointsMaterial({ color: 0xffe2a0, size: 0.05, transparent: true, opacity: 0.8, blending: THREE.AdditiveBlending, depthWrite: false }));
+    specks.userData.spin = true;
+    sc.add(specks);
+    const cap = textSprite([place, viewingDate].filter(Boolean).join(' · ') || 'זיכרון', { size: 56, scale: 1.6 });
+    cap.position.set(0, H + 0.9, D * 0.3);
+    sc.add(cap);
+    dio.depth = D;
+    dio.w = W;
+    return sc;
+  }
+  let viewingDate = '';
+  async function enterPhoto(p) {
+    if (dio.busy || mode === 'photo') return;
+    dio.busy = true;
+    closePhoto();
+    viewingDate = p.date ? dateFmt.format(p.date) : '';
+    try {
+      status('🔮 מכינים את התמונה…');
+      const [depth, tex] = await Promise.all([
+        depthOf(p, (f) => status(f >= 0.999 ? '🔮 מחשבים את העומק של התמונה…' : `🔮 טוען את מודל העומק (פעם אחת בלבד)… ${Math.round(f * 100)}%`)).then((d) => (status('🔮 בונים את התמונה בתלת-ממד…'), d)),
+        texOf(p.full),
+      ]);
+      if (!running) return;
+      if (dio.scene && dio.photo !== p) dio.scene.traverse((o) => { o.geometry?.dispose(); o.material?.map?.dispose?.(); o.material?.dispose?.(); });
+      if (dio.photo !== p) { dio.scene = buildDiorama(depth, tex); dio.photo = p; }
+      dio.back = { mode, scene, pos: player.position.clone(), rot: player.rotation.y, yaw };
+      mode = 'photo';
+      scene = dio.scene;
+      scene.add(player);
+      player.position.set(0, 0, dio.depth + 3.2);
+      player.rotation.y = Math.PI;
+      yaw = 0;
+      pitch = 0.12;
+      $('.st-radar').hidden = true;
+      $('[data-act="leave-photo"]').hidden = false;
+      $('[data-act="exit"]').hidden = true;
+      status('');
+      showToast('🔮 אתם בתוך התמונה. הסתובבו כדי לראות את העומק');
+      flash();
+    } catch (e) {
+      console.warn('depth failed', e);
+      status('');
+      showToast('לא הצלחנו להיכנס לתמונה הפעם. נסו שוב.');
+    } finally {
+      dio.busy = false;
+    }
+  }
+  function leavePhoto() {
+    if (mode !== 'photo' || !dio.back) return;
+    const b = dio.back;
+    mode = b.mode;
+    scene = b.scene;
+    scene.add(player);
+    player.position.copy(b.pos);
+    player.rotation.y = b.rot;
+    yaw = b.yaw;
+    $('.st-radar').hidden = mode !== 'street';
+    $('[data-act="leave-photo"]').hidden = true;
+    $('[data-act="exit"]').hidden = false;
+    cooldown = 1;
+    flash();
+  }
   root.addEventListener('click', (e) => {
     const act = e.target.closest('[data-act]')?.dataset.act;
     if (act === 'close-photo') closePhoto();
+    if (act === 'enter-photo' && viewing) enterPhoto(viewing);
+    if (act === 'leave-photo') leavePhoto();
     if (act === 'exit') stop();
   });
   $('.st-photo').addEventListener('click', (e) => { if (e.target === $('.st-photo')) closePhoto(); });
@@ -883,7 +992,7 @@ export async function enterStreet({ root, photos, place, lat, lng, onExit }) {
       const rx = -fz, rz = fx;
       const mx = (rx * ix - fx * iz) / (mag || 1), mz = (rz * ix - fz * iz) / (mag || 1);
       const nx = player.position.x + mx * speed * dt, nz = player.position.z + mz * speed * dt;
-      const hit = mode === 'street' ? blockedAt : hallBlocked;
+      const hit = mode === 'street' ? blockedAt : mode === 'hall' ? hallBlocked : photoBlocked;
       if (!hit(nx, nz)) player.position.set(nx, 0, nz);
       else if (!hit(nx, player.position.z)) player.position.x = nx;
       else if (!hit(player.position.x, nz)) player.position.z = nz;
@@ -893,6 +1002,7 @@ export async function enterStreet({ root, photos, place, lat, lng, onExit }) {
       player.rotation.y += d * Math.min(1, dt * 12);
     }
     animateCharacter(player, speed, dt);
+    if (mode === 'photo') scene.traverse((o) => { if (o.userData.spin) o.rotation.y = Math.sin(now / 6000) * 0.05; });
     for (const st of standees) {
       if (st.parent !== scene) continue;
       if (st.userData.grow < 1) { st.userData.grow = Math.min(1, st.userData.grow + dt * 1.8); const k = st.userData.grow; st.scale.setScalar(k < 1 ? 1 - Math.pow(1 - k, 3) * (1 - 0.01) : 1); }
@@ -957,7 +1067,7 @@ export async function enterStreet({ root, photos, place, lat, lng, onExit }) {
     }
     const prompt = $('.st-prompt');
     const doorDist = mode === 'street' ? Math.hypot(player.position.x - markerPos.x, player.position.z - markerPos.z) : Infinity;
-    if (near && !viewing) { prompt.textContent = isTouch ? '📸 הקישו על התמונה להגדלה' : '📸 E להגדלת התמונה'; prompt.hidden = false; }
+    if (near && !viewing && mode !== 'photo') { prompt.textContent = isTouch ? '📸 הקישו על התמונה להגדלה ולכניסה אליה' : '📸 E להגדלה · Q כדי להיכנס לתמונה'; prompt.hidden = false; }
     else if (doorDist < 7 && !viewing) { prompt.textContent = '✨ היכנסו לעיגול המואר כדי להיכנס לאירוע'; prompt.hidden = false; }
     else prompt.hidden = true;
 
@@ -965,7 +1075,7 @@ export async function enterStreet({ root, photos, place, lat, lng, onExit }) {
     const head = player.position.clone().add(new THREE.Vector3(0, 1.6, 0));
     // In narrow streets, rise above the roofs before pulling in close (as street games do).
     const dir = new THREE.Vector3();
-    const camBad = (p) => mode === 'street'
+    const camBad = (p) => mode === 'photo' ? p.y < 0.3 || p.z < dio.depth + 0.4 : mode === 'street'
       ? solids.some((b) => p.y < b.h + 0.6 && p.x > b.box[0] - 0.3 && p.x < b.box[2] + 0.3 && p.z > b.box[1] - 0.3 && p.z < b.box[3] + 0.3 && (inPoly(p.x, p.z, b.pts) || closestOnPoly(p.x, p.z, b.pts).d < 0.3))
       : Math.abs(p.x) > HW - 0.3 || Math.abs(p.z) > HD - 0.3 || p.y > HH - 0.3;
     const clearPath = (d) => { for (let t = 0.35; t <= 1.001; t += 0.13) { tmp.copy(head).addScaledVector(dir, d * t); if (camBad(tmp)) return false; } return true; };

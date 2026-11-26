@@ -237,3 +237,7 @@ body.in-street .panel, body.in-street .brand, body.in-street .credit, body.in-st
   border: 1px solid rgba(255, 255, 255, 0.18); pointer-events: none; white-space: nowrap;
 }
 @media (max-width: 760px) { .st-status { top: calc(70px + env(safe-area-inset-top, 0px)); } }
+
+.st-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+.st-btn.gold { background: var(--gold); color: var(--gold-ink); border-color: transparent; }
+.st-photo-actions { display: flex; gap: 10px; }

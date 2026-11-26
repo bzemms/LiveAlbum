@@ -9,6 +9,7 @@
     "preview": "vite preview"
   },
   "dependencies": {
+    "@huggingface/transformers": "^4.3.2",
     "@mapbox/vector-tile": "^3.0.0",
     "@mediapipe/tasks-vision": "^1.2.3",
     "exifr": "^7.1.3",
