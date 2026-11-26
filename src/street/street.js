@@ -200,6 +200,26 @@ export async function enterStreet({ root, photos, place, lat, lng, onExit }) {
   ground.receiveShadow = true;
   street.add(ground);
 
+  // Parks and water as flat shapes on the ground.
+  for (const [rings, color, y] of [[area.parks || [], night ? 0x3d5a40 : 0x9cc57f, 0.008], [area.water || [], night ? 0x24406a : 0x6fb2dc, 0.012]]) {
+    const geos = [];
+    for (const ring of rings) {
+      try {
+        const g = new THREE.ShapeGeometry(new THREE.Shape(ring.map(([x, z]) => new THREE.Vector2(x, -z))));
+        g.rotateX(-Math.PI / 2);
+        g.translate(0, y, 0);
+        g.deleteAttribute('uv');
+        geos.push(g);
+      } catch { /* skip a broken ring */ }
+    }
+    if (geos.length) {
+      const m = new THREE.Mesh(mergeGeometries(geos), new THREE.MeshLambertMaterial({ color }));
+      m.receiveShadow = true;
+      street.add(m);
+      geos.forEach((g) => g.dispose());
+    }
+  }
+
   // Roads: ribbons with round joints, merged into two meshes.
   const roadGeo = { car: [], foot: [] };
   for (const r of area.roads) {
@@ -234,12 +254,24 @@ export async function enterStreet({ root, photos, place, lat, lng, onExit }) {
 
   // Buildings: extruded footprints, coloured per building, merged into one mesh.
   const solids = area.buildings.map((b) => ({ ...b, box: bbox(b.pts) }));
-  // The venue: the building the photo spot falls in, else the nearest one, else a pavilion we add.
+  // The street nearest to the photo spot: photos and the visitor stand there, facing the venue.
+  let road = null;
+  for (const r of area.roads) {
+    for (let i = 0; i < r.pts.length - 1; i++) {
+      const c = closestOnPoly(0, 0, [r.pts[i], r.pts[i + 1]]);
+      const score = c.d + (r.foot ? 6 : 0); // prefer real streets over footpaths
+      if (!road || score < road.score) road = { ...c, score, width: r.width, dir: new THREE.Vector2(c.ex, c.ez).normalize() };
+    }
+  }
+  if (road && road.d > 80) road = null;
+  const focus = road ? [road.x, road.z] : [0, 0];
+
+  // The venue: the building the photo spot falls in, else the one nearest the street spot, else a pavilion.
   let venue = solids.find((b) => inPoly(0, 0, b.pts));
   if (!venue) {
     let best = null;
     for (const b of solids) {
-      const c = closestOnPoly(0, 0, b.pts);
+      const c = closestOnPoly(focus[0], focus[1], b.pts);
       if (c.d < 45 && (!best || c.d < best.c.d)) best = { b, c };
     }
     venue = best?.b;
@@ -249,6 +281,9 @@ export async function enterStreet({ root, photos, place, lat, lng, onExit }) {
     venue.box = bbox(venue.pts);
     solids.push(venue);
   }
+
+  // A named place inside the venue (from the map's points of interest) names the venue.
+  if (!venue.name) venue.name = (area.pois || []).find((p) => inPoly(p.x, p.z, venue.pts))?.name || null;
 
   const bGeos = [];
   const col = new THREE.Color();
@@ -283,7 +318,7 @@ export async function enterStreet({ root, photos, place, lat, lng, onExit }) {
   }
 
   // Door on the venue wall facing the street, and the outward direction from it.
-  let doorAt = closestOnPoly(0, 0, venue.pts);
+  let doorAt = closestOnPoly(focus[0], focus[1], venue.pts);
   if (doorAt.len < 3) {
     // Too narrow a wall for a door: use the longest wall instead.
     let longest = null;
@@ -329,13 +364,20 @@ export async function enterStreet({ root, photos, place, lat, lng, onExit }) {
   const pickables = [];
   const streetPhotos = photos.slice(0, 6);
   const tangent = new THREE.Vector2(out.y, -out.x);
-  streetPhotos.forEach((p, i) => {
-    const side = i % 2 === 0 ? 1 : -1;
-    const k = Math.floor(i / 2);
-    const along = side * (2.9 + k * 3.1);
-    const dist = 4.2 + k * 1.6;
+  // Candidate easel spots fan out from the door; spots inside or against a building are skipped.
+  const easelSpots = [];
+  for (let k = 0; k < 8 && easelSpots.length < streetPhotos.length; k++) {
+    for (const side of [1, -1]) {
+      const along = side * (2.9 + k * 3.1), dist = 4.2 + k * 1.2;
+      const x = door.x + out.x * dist + tangent.x * along, z = door.z + out.y * dist + tangent.y * along;
+      const clear = !solids.some((b) => x > b.box[0] - 2 && x < b.box[2] + 2 && z > b.box[1] - 2 && z < b.box[3] + 2 && (inPoly(x, z, b.pts) || closestOnPoly(x, z, b.pts).d < 1.4));
+      if (clear) easelSpots.push({ x, z, side });
+    }
+  }
+  streetPhotos.slice(0, easelSpots.length).forEach((p, i) => {
+    const { x: ex, z: ez, side } = easelSpots[i];
     const { group, pick } = photoFrame(p, 2.3, { loader });
-    group.position.set(door.x + out.x * dist + tangent.x * along, 2.35, door.z + out.y * dist + tangent.y * along);
+    group.position.set(ex, 2.35, ez);
     group.rotation.y = facing + side * 0.32;
     street.add(group);
     pickables.push(...pick);
@@ -491,21 +533,30 @@ export async function enterStreet({ root, photos, place, lat, lng, onExit }) {
   const player = makeCharacter();
   let mode = 'street';
   let scene = street;
+  // Start a short walk from the door, on open ground: straight out if possible, else a bit to the side.
+  // Start on the street in front of the venue, with room around the visitor.
+  const roomy = (x, z, r) => !solids.some((b) => x > b.box[0] - r && x < b.box[2] + r && z > b.box[1] - r && z < b.box[3] + r && (inPoly(x, z, b.pts) || closestOnPoly(x, z, b.pts).d < r));
   const spawnStreet = () => {
-    let d = 13;
-    let p = door.clone().add(new THREE.Vector3(out.x * d, 0, out.y * d));
-    while (blockedAt(p.x, p.z) && d > 4) { d -= 1.5; p = door.clone().add(new THREE.Vector3(out.x * d, 0, out.y * d)); }
-    return p;
+    const tries = [];
+    if (road) for (const s2 of [0, 6, -6, 12, -12]) tries.push([road.x + road.dir.x * s2, road.z + road.dir.y * s2]);
+    for (let d = 12; d >= 5; d -= 1) for (const side of [0, 2, -2, 4, -4, 7, -7]) tries.push([door.x + out.x * d + tangent.x * side, door.z + out.y * d + tangent.y * side]);
+    for (const need of [3, 2, 1]) {
+      for (const [x, z] of tries) {
+        const d = Math.hypot(x - markerPos.x, z - markerPos.z);
+        if (d > 4 && d < 30 && roomy(x, z, need)) return new THREE.Vector3(x, 0, z);
+      }
+    }
+    return door.clone().add(new THREE.Vector3(out.x * 6, 0, out.y * 6));
   };
   player.position.copy(spawnStreet());
-  player.rotation.y = facing + Math.PI;
+  // The camera sits at player + dir(yaw) and looks back at the player: put it on the far side
+  // of the visitor from the door, so the first view is the venue.
+  let yaw = Math.atan2(player.position.x - door.x, player.position.z - door.z);
+  player.rotation.y = yaw + Math.PI;
   street.add(player);
-  // The camera sits at player + dir(yaw) and looks back at the player, so yaw = facing puts it
-  // on the street side looking toward the door.
-  let yaw = facing;
   let pitch = 0.32;
   let camDist = 7;
-  let cooldown = 0;
+  let cooldown = 1.5;
 
   const goHall = () => {
     mode = 'hall';
@@ -679,16 +730,25 @@ export async function enterStreet({ root, photos, place, lat, lng, onExit }) {
 
     // Third-person camera; pulled in so it never sits inside a building or outside the hall.
     const head = player.position.clone().add(new THREE.Vector3(0, 1.6, 0));
-    let dist = camDist;
-    const dir = new THREE.Vector3(Math.sin(yaw) * Math.cos(pitch), Math.sin(pitch), Math.cos(yaw) * Math.cos(pitch));
-    for (; dist > 1.2; dist -= 0.4) {
-      tmp.copy(head).addScaledVector(dir, dist);
-      const bad = mode === 'street'
-        ? solids.some((b) => tmp.y < b.h + 0.5 && tmp.x > b.box[0] && tmp.x < b.box[2] && tmp.z > b.box[1] && tmp.z < b.box[3] && inPoly(tmp.x, tmp.z, b.pts))
-        : Math.abs(tmp.x) > HW - 0.3 || Math.abs(tmp.z) > HD - 0.3 || tmp.y > HH - 0.3;
-      if (!bad) break;
+    // In narrow streets, rise above the roofs before pulling in close (as street games do).
+    const dir = new THREE.Vector3();
+    const camBad = (p) => mode === 'street'
+      ? solids.some((b) => p.y < b.h + 0.6 && p.x > b.box[0] - 0.3 && p.x < b.box[2] + 0.3 && p.z > b.box[1] - 0.3 && p.z < b.box[3] + 0.3 && (inPoly(p.x, p.z, b.pts) || closestOnPoly(p.x, p.z, b.pts).d < 0.3))
+      : Math.abs(p.x) > HW - 0.3 || Math.abs(p.z) > HD - 0.3 || p.y > HH - 0.3;
+    const clearPath = (d) => { for (let t = 0.35; t <= 1.001; t += 0.13) { tmp.copy(head).addScaledVector(dir, d * t); if (camBad(tmp)) return false; } return true; };
+    let found = false;
+    for (let pt = pitch; pt <= 1.45 && !found; pt += 0.15) {
+      dir.set(Math.sin(yaw) * Math.cos(pt), Math.sin(pt), Math.cos(yaw) * Math.cos(pt));
+      // Looking down steeply, back off far enough to clear the roofs.
+      const far = mode === 'street' && pt > 0.85 ? Math.max(camDist, 18) : camDist;
+      for (let d = far; d >= Math.min(camDist, 3); d -= 1) if (clearPath(d)) { camPos.copy(head).addScaledVector(dir, d); found = true; break; }
     }
-    camPos.copy(head).addScaledVector(dir, dist);
+    if (!found) {
+      dir.set(Math.sin(yaw) * Math.cos(pitch), Math.sin(pitch), Math.cos(yaw) * Math.cos(pitch));
+      let d = camDist;
+      while (d > 1.2 && !clearPath(d)) d -= 0.4;
+      camPos.copy(head).addScaledVector(dir, d);
+    }
     camera.position.lerp(camPos, Math.min(1, dt * 10));
     camera.lookAt(head);
 
@@ -720,5 +780,5 @@ export async function enterStreet({ root, photos, place, lat, lng, onExit }) {
   camera.position.copy(player.position).add(new THREE.Vector3(Math.sin(yaw) * 7, 40, Math.cos(yaw) * 7));
   $('.st-loading').classList.add('done');
   requestAnimationFrame(step);
-  return { stop, debug: { player, get mode() { return mode; }, markerPos, door, out } };
+  return { stop, debug: { player, camera, solids, venue, get mode() { return mode; }, markerPos, door, out } };
 }

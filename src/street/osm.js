@@ -44,7 +44,7 @@ async function query(lat, lng, radius) {
   let lastErr;
   for (const url of ENDPOINTS) {
     const ctl = new AbortController();
-    const timer = setTimeout(() => ctl.abort(), 15000);
+    const timer = setTimeout(() => ctl.abort(), 10000);
     try {
       const r = await fetch(url, { method: 'POST', body: new URLSearchParams({ data: q }), signal: ctl.signal });
       if (!r.ok) throw new Error(`HTTP ${r.status}`);
@@ -115,6 +115,15 @@ export function generated(seed = 7) {
 }
 
 export async function loadArea(lat, lng, radius = 230) {
+  // 1. OpenStreetMap vector tiles from a CDN: fast and reliable.
+  try {
+    const { loadFromTiles } = await import('./tiles.js');
+    const area = await loadFromTiles(lat, lng, radius);
+    if (area.buildings.length >= 3) return area;
+  } catch {
+    /* try the Overpass API next */
+  }
+  // 2. The Overpass API: the same data, but often slow or overloaded.
   try {
     const els = await query(lat, lng, radius);
     const area = fromElements(els, lat, lng);
