@@ -233,7 +233,7 @@ export async function enterStreet({ root, photos, place, lat, lng, onExit, type:
   root.innerHTML = `
     <canvas class="st-canvas"></canvas>
     <div class="st-top">
-      <div class="st-actions"><button class="st-btn" data-act="exit">🌍 חזרה לגלובוס</button><button class="st-btn gold" data-act="leave-photo" hidden>↩ יציאה מהתמונה</button></div>
+      <div class="st-actions"><button class="st-btn" data-act="exit">🌍 חזרה לגלובוס</button><button class="st-btn gold" data-act="leave-photo" hidden>↩ יציאה מהתמונה</button><button class="st-btn" data-act="nav-mode" type="button"></button></div>
       <div class="st-place"><b></b><span></span><button class="st-type" data-act="type" type="button"></button></div>
     </div>
     <div class="st-types" hidden></div>
@@ -243,6 +243,15 @@ export async function enterStreet({ root, photos, place, lat, lng, onExit, type:
     <div class="st-status" hidden></div>
     <div class="st-title"><b></b><span></span></div>
     <div class="st-help">${isTouch ? 'ג׳ויסטיק להליכה · גרירה לסיבוב המצלמה · הקשה על תמונה להגדלה · הקשה על המפה להגדלה' : 'WASD או חצים להליכה · Shift לריצה · גרירה לסיבוב · E או לחיצה על תמונה להגדלה · M או לחיצה על המפה להגדלה'}</div>
+    <div class="st-strip" hidden></div>
+    <div class="st-choose" hidden>
+      <div class="st-choose-card">
+        <h2>איך תרצו לעבור בין התמונות?</h2>
+        <button class="st-choice" data-act="pick-nav" data-nav="album" type="button"><b>📖 אלבום</b><span>התמונות נפתחות אחת אחרי השנייה בלחיצה על "הבא". בלי הליכה.</span></button>
+        <button class="st-choice" data-act="pick-nav" data-nav="game" type="button"><b>🎮 משחק</b><span>הולכים ברחוב, מחפשים את הזכרונות ונכנסים פנימה.</span></button>
+        <p>אפשר להחליף בכל רגע מהכפתור למעלה.</p>
+      </div>
+    </div>
     <div class="st-album"><button class="st-btn" data-act="prev" type="button">‹ הקודם</button><span class="st-album-count"></span><button class="st-btn gold" data-act="next" type="button">הבא ›</button></div>
     <div class="st-joy" ${isTouch ? '' : 'hidden'}><div class="st-knob"></div></div>
     <div class="st-photo" hidden><figure><img alt=""><video controls playsinline hidden></video><figcaption><b></b><span></span></figcaption></figure><div class="st-photo-actions"><button class="st-btn" data-act="prev" type="button">‹</button><button class="st-btn" data-act="enter-photo">🔮 היכנסו לתמונה</button><button class="st-btn" data-act="close-photo">✕ סגור</button><button class="st-btn gold st-next-photo" data-act="next" type="button">הבא ›</button></div></div>
@@ -1021,6 +1030,8 @@ export async function enterStreet({ root, photos, place, lat, lng, onExit, type:
       if (e.code === 'KeyE' && near) { openPhoto(near); return; }
       if (e.code === 'KeyQ' && near && mode !== 'photo') { enterPhoto(near); return; }
       if (e.code === 'Space' || e.code === 'PageDown') { e.preventDefault(); albumStep(1); return; }
+      if (viewing && e.code === 'ArrowLeft') { e.preventDefault(); albumStep(1); return; }
+      if (viewing && e.code === 'ArrowRight') { e.preventDefault(); albumStep(-1); return; }
       if (e.code === 'Backspace' || e.code === 'PageUp') { e.preventDefault(); albumStep(-1); return; }
       keys.add(e.code);
     } else keys.delete(e.code);
@@ -1086,7 +1097,7 @@ export async function enterStreet({ root, photos, place, lat, lng, onExit, type:
     m.beam.visible = false;
     updateCount();
     const left = memories.filter((q) => !q.found).length;
-    if (left) showToast(`✨ מצאתם זיכרון! נשארו עוד ${left}`);
+    if (nav === 'album') { /* no game messages in album mode */ } else if (left) showToast(`✨ מצאתם זיכרון! נשארו עוד ${left}`);
     else if (!allFoundShown) { allFoundShown = true; showToast(CFG.door ? `🎉 מצאתם את כל הזכרונות! עכשיו פנימה: ${CFG.door}` : '🎉 מצאתם את כל הזכרונות במקום הזה!', 5000); }
     routeAt = -1;
   }
@@ -1229,6 +1240,9 @@ export async function enterStreet({ root, photos, place, lat, lng, onExit, type:
     const act = e.target.closest('[data-act]')?.dataset.act;
     if (act === 'close-photo') closePhoto();
     if (act === 'next') albumStep(1);
+    if (act === 'nav-mode') setNav(nav === 'album' ? 'game' : 'album');
+    if (act === 'pick-nav') { $('.st-choose').hidden = true; setNav(e.target.closest('[data-nav]').dataset.nav, true); }
+    if (act === 'thumb') goToStop(Number(e.target.closest('[data-i]').dataset.i));
     if (act === 'prev') albumStep(-1);
     if (act === 'type') {
       const menu = $('.st-types');
@@ -1286,11 +1300,57 @@ export async function enterStreet({ root, photos, place, lat, lng, onExit, type:
   let yawGoal = null;
   const updateAlbum = () => {
     $('.st-album-count').textContent = stops.length ? `${Math.max(0, stopIdx + 1)} / ${stops.length}` : '';
+    root.querySelectorAll('.st-thumb').forEach((t, i) => t.classList.toggle('on', i === stopIdx));
+    root.querySelector('.st-thumb.on')?.scrollIntoView({ block: 'nearest', inline: 'center', behavior: 'smooth' });
     const last = stopIdx >= stops.length - 1;
     const label = !last ? 'הבא ›' : neighbors.next ? `${neighbors.next.label} ›` : 'סוף האלבום';
     root.querySelectorAll('[data-act="next"]').forEach((b) => { b.textContent = label; b.disabled = last && !neighbors.next; });
     root.querySelectorAll('[data-act="prev"]').forEach((b) => { b.disabled = stopIdx <= 0 && !neighbors.prev; });
   };
+  // Navigation mode: 'album' (photos one after another, no walking HUD) or 'game' (walk and explore).
+  const NAV_KEY = 'livealbum.nav';
+  let nav = (() => { try { return localStorage.getItem(NAV_KEY); } catch { return null; } })();
+  const firstTime = !nav;
+  if (!nav) nav = 'album';
+  function setNav(m, start = false) {
+    nav = m;
+    try { localStorage.setItem(NAV_KEY, m); } catch { /* private mode */ }
+    root.classList.toggle('nav-album', m === 'album');
+    $('[data-act="nav-mode"]').textContent = m === 'album' ? '🎮 מצב משחק' : '📖 מצב אלבום';
+    $('.st-strip').hidden = m !== 'album' || !stops.length;
+    chevrons.visible = m !== 'album';
+    for (const mm of memories) mm.beam.visible = m !== 'album' && !mm.found;
+    if (m === 'album' && (start || stopIdx < 0) && intro >= 1 && stops.length) goToStop(Math.max(0, stopIdx));
+  }
+  // Thumbnails of every stop, to jump straight to any photo.
+  $('.st-strip').replaceChildren(...stops.map((st, i) => {
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.className = 'st-thumb';
+    b.dataset.act = 'thumb';
+    b.dataset.i = i;
+    b.title = st.photo.place || '';
+    const im = document.createElement('img');
+    im.src = st.photo.thumb;
+    im.alt = '';
+    im.crossOrigin = 'anonymous';
+    b.append(im);
+    if (st.photo.video) { const v = document.createElement('span'); v.textContent = '▶'; b.append(v); }
+    return b;
+  }));
+  // Swipe the open photo sideways to move on (right = next, as pages turn in Hebrew).
+  {
+    let sw = null;
+    const fig = $('.st-photo figure');
+    fig.addEventListener('pointerdown', (e) => { sw = { x: e.clientX, y: e.clientY, t: performance.now() }; });
+    fig.addEventListener('pointerup', (e) => {
+      if (!sw) return;
+      const dx = e.clientX - sw.x, dy = e.clientY - sw.y, quick = performance.now() - sw.t < 700;
+      sw = null;
+      if (quick && Math.abs(dx) > 50 && Math.abs(dx) > Math.abs(dy) * 1.5) albumStep(dx > 0 ? 1 : -1);
+    });
+    fig.style.touchAction = 'pan-y';
+  }
   function arriveAt(st) {
     auto = null;
     vel.set(0, 0);
@@ -1571,6 +1631,8 @@ export async function enterStreet({ root, photos, place, lat, lng, onExit, type:
         $('.st-title').hidden = true;
         root.classList.remove('st-intro');
         if (startAt && stops.length) goToStop(startAt === 'last' ? stops.length - 1 : 0);
+        else if (firstTime && stops.length) $('.st-choose').hidden = false;
+        else if (nav === 'album' && stops.length) goToStop(0);
       }
     } else {
       camera.position.lerp(camPos, 1 - Math.exp(-dt * 7));
@@ -1622,6 +1684,7 @@ export async function enterStreet({ root, photos, place, lat, lng, onExit, type:
   $('.st-title b').textContent = venue?.name || place || '';
   $('.st-title span').textContent = photos[0]?.date ? dateFmt.format(photos[0].date) : '';
   intro = 0.0001;
+  setNav(nav); // after `intro` exists: applies the mode's HUD
   root.classList.add('st-intro');
   $('.st-loading').classList.add('done');
   requestAnimationFrame(step);
