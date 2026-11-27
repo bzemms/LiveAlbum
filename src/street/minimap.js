@@ -109,18 +109,14 @@ export function makeMinimap(canvas, { radius, buildings, roads, night }) {
     ctx.stroke();
   }
 
-  /** The world point under a tap at (clientX, clientY): a star or the door if one is close, else the ground. */
+  /** The photo star (or the door) under a tap at (clientX, clientY), or null: jumps only go to this area's photos. */
   draw.pick = (clientX, clientY) => {
     if (!view) return null;
     const r = canvas.getBoundingClientRect();
     const cx = ((clientX - r.left) / r.width) * canvas.width, cy = ((clientY - r.top) / r.height) * canvas.height;
-    if (Math.hypot(cx - view.c, cy - view.c) > view.c) return null;
-    let best = null, bd = 16 * dpr;
+    let best = null, bd = 26 * dpr;
     for (const h of hits) { const d = Math.hypot(h.cx - cx, h.cy - cy); if (d < bd) { bd = d; best = h; } }
-    if (best) return { x: best.x, z: best.z, icon: true };
-    const dx = (cx - view.c) / view.k, dy = (cy - view.c) / view.k;
-    const cs = Math.cos(view.yaw), sn = Math.sin(view.yaw);
-    return { x: view.x + (dx * cs + dy * sn) / PX, z: view.z + (-dx * sn + dy * cs) / PX };
+    return best && { x: best.x, z: best.z };
   };
   return draw;
 }

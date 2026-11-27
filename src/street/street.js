@@ -222,7 +222,7 @@ export async function enterStreet({ root, photos, place, lat, lng, onExit }) {
       <div class="st-place"><b></b><span></span></div>
     </div>
     <div class="st-prompt" hidden></div>
-    <div class="st-radar"><div class="st-count" hidden></div><canvas class="st-map"></canvas><div class="st-map-hint">הקישו על מקום במפה כדי לקפוץ אליו</div></div>
+    <div class="st-radar"><div class="st-count" hidden></div><canvas class="st-map"></canvas><div class="st-map-hint">הקישו על כוכב של תמונה כדי לקפוץ אליה</div></div>
     <div class="st-toast" hidden></div>
     <div class="st-status" hidden></div>
     <div class="st-title"><b></b><span></span></div>
@@ -750,7 +750,7 @@ export async function enterStreet({ root, photos, place, lat, lng, onExit }) {
   street.add(chevrons);
   const drawMap = makeMinimap($('.st-map'), { radius: R, buildings: solids, roads: area.roads, night });
   let route = null, routeAt = -1, routeFrom = new THREE.Vector3(1e9, 0, 0);
-  // Tap the radar to open it large; tap a place on the large map to jump there.
+  // Tap the radar to open it large; tap a photo's star (or the door) on it to jump there.
   let mapBig = false;
   const setMapBig = (on) => { mapBig = on; $('.st-radar').classList.toggle('big', on); };
   const jumpTo = (tx, tz) => {
@@ -776,7 +776,7 @@ export async function enterStreet({ root, photos, place, lat, lng, onExit }) {
     if (mode !== 'street' || fading) return;
     if (!mapBig) { setMapBig(true); return; }
     const p = drawMap.pick(e.clientX, e.clientY);
-    if (!p) return;
+    if (!p) { showToast('הקישו על אחד הכוכבים — אפשר לקפוץ רק לתמונות של המקום', 2500); return; }
     setMapBig(false);
     jumpTo(p.x, p.z);
   });
