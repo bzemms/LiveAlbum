@@ -10,6 +10,7 @@ import { peopleFrom } from './figures.js';
 import { depthOf } from './depth.js';
 import { buildCity } from './buildings.js';
 import { dressStreet } from './dressing.js';
+import { makeCharacter, dressCharacter, animateCharacter, loadAvatar, saveAvatar, mountAvatarPanel } from './character.js';
 
 const DAY = {
   sky: 0xa9d3f0, fog: 0xc9e2f2, ground: 0xd8d2c4, road: 0x55595f, foot: 0xc9bea6, walk: 0xc4c2bd, curb: 0xe9e7e1,
@@ -83,43 +84,6 @@ function planksTexture() {
   t.repeat.set(6, 4);
   t.colorSpace = THREE.SRGBColorSpace;
   return t;
-}
-
-// ---------- Character ----------
-function makeCharacter() {
-  const g = new THREE.Group();
-  const shirt = new THREE.MeshLambertMaterial({ color: 0xf4f4f0 });
-  const pants = new THREE.MeshLambertMaterial({ color: 0x23262d });
-  const skin = new THREE.MeshLambertMaterial({ color: 0xe0b48f });
-  const torso = new THREE.Mesh(new THREE.CapsuleGeometry(0.26, 0.5, 4, 10), shirt);
-  torso.position.y = 1.2;
-  const head = new THREE.Mesh(new THREE.SphereGeometry(0.2, 16, 12), skin);
-  head.position.y = 1.72;
-  const hair = new THREE.Mesh(new THREE.SphereGeometry(0.205, 16, 8, 0, Math.PI * 2, 0, Math.PI / 2.2), pants);
-  hair.position.y = 1.74;
-  const limb = (w, h, mat) => {
-    const pivot = new THREE.Group();
-    const m = new THREE.Mesh(new THREE.BoxGeometry(w, h, w), mat);
-    m.position.y = -h / 2;
-    pivot.add(m);
-    return pivot;
-  };
-  const legL = limb(0.17, 0.82, pants), legR = limb(0.17, 0.82, pants);
-  legL.position.set(-0.12, 0.84, 0); legR.position.set(0.12, 0.84, 0);
-  const armL = limb(0.12, 0.62, shirt), armR = limb(0.12, 0.62, shirt);
-  armL.position.set(-0.36, 1.48, 0); armR.position.set(0.36, 1.48, 0);
-  g.add(torso, head, hair, legL, legR, armL, armR);
-  g.traverse((o) => { if (o.isMesh) o.castShadow = true; });
-  g.userData = { legL, legR, armL, armR, phase: 0 };
-  return g;
-}
-function animateCharacter(ch, speed, dt) {
-  const u = ch.userData;
-  u.phase += dt * (speed > 0.1 ? 4 + speed * 1.1 : 0);
-  const swing = speed > 0.1 ? Math.min(0.8, 0.35 + speed * 0.07) : 0;
-  const s = Math.sin(u.phase) * swing;
-  const ease = (o, v) => (o.rotation.x += (v - o.rotation.x) * Math.min(1, dt * 12));
-  ease(u.legL, s); ease(u.legR, -s); ease(u.armL, -s * 0.8); ease(u.armR, s * 0.8);
 }
 
 // ---------- Photo frame ----------
@@ -220,7 +184,7 @@ export async function enterStreet({ root, photos, place, lat, lng, onExit }) {
   root.innerHTML = `
     <canvas class="st-canvas"></canvas>
     <div class="st-top">
-      <div class="st-actions"><button class="st-btn" data-act="exit">🌍 חזרה לגלובוס</button><button class="st-btn gold" data-act="leave-photo" hidden>↩ יציאה מהתמונה</button></div>
+      <div class="st-actions"><button class="st-btn" data-act="exit">🌍 חזרה לגלובוס</button><button class="st-btn" data-act="avatar">🧍 הדמות שלי</button><button class="st-btn gold" data-act="leave-photo" hidden>↩ יציאה מהתמונה</button></div>
       <div class="st-place"><b></b><span></span></div>
     </div>
     <div class="st-prompt" hidden></div>
@@ -231,6 +195,7 @@ export async function enterStreet({ root, photos, place, lat, lng, onExit }) {
     <div class="st-help">${isTouch ? 'ג׳ויסטיק להליכה · גרירה לסיבוב המצלמה · הקשה על תמונה להגדלה' : 'WASD או חצים להליכה · Shift לריצה · גרירה לסיבוב · E או לחיצה על תמונה להגדלה'}</div>
     <div class="st-joy" ${isTouch ? '' : 'hidden'}><div class="st-knob"></div></div>
     <div class="st-photo" hidden><figure><img alt=""><video controls playsinline hidden></video><figcaption><b></b><span></span></figcaption></figure><div class="st-photo-actions"><button class="st-btn gold" data-act="enter-photo">🔮 היכנסו לתמונה</button><button class="st-btn" data-act="close-photo">✕ סגור</button></div></div>
+    <div class="st-avatar" hidden></div>
     <div class="st-loading"><div class="st-spinner"></div><div>יורדים לרחוב…</div></div>`;
   const $ = (s) => root.querySelector(s);
   $('.st-place b').textContent = place || 'המקום';
@@ -670,7 +635,8 @@ export async function enterStreet({ root, photos, place, lat, lng, onExit }) {
   const hallBlocked = (x, z) => Math.abs(x) > HW - BODY - 0.1 || Math.abs(z) > HD - BODY - 0.1 || tables.some(([tx, tz]) => Math.hypot(x - tx, z - tz) < 1.95);
 
   // ----- Player -----
-  const player = makeCharacter();
+  let avatar = loadAvatar();
+  const player = makeCharacter(avatar);
   let mode = 'street';
   let scene = street;
   // Start a short walk from the door, on open ground: straight out if possible, else a bit to the side.
@@ -815,7 +781,8 @@ export async function enterStreet({ root, photos, place, lat, lng, onExit }) {
   const onKey = (e) => {
     if (e.type === 'keydown') {
       skipIntro();
-      if (e.code === 'Escape') { if (!$('.st-photo').hidden) closePhoto(); else if (mode === 'photo') leavePhoto(); return; }
+      if (e.code === 'Escape') { if (posing) closeAvatar(); else if (!$('.st-photo').hidden) closePhoto(); else if (mode === 'photo') leavePhoto(); return; }
+      if (posing) return;
       if (e.code === 'KeyE' && near) { openPhoto(near); return; }
       if (e.code === 'KeyQ' && near && mode !== 'photo') { enterPhoto(near); return; }
       keys.add(e.code);
@@ -833,13 +800,14 @@ export async function enterStreet({ root, photos, place, lat, lng, onExit }) {
   });
   canvas.addEventListener('pointermove', (e) => {
     if (!drag || drag.id !== e.pointerId) return;
+    if (posing) { player.rotation.y += (e.clientX - drag.x) * 0.012; drag.x = e.clientX; drag.y = e.clientY; return; }
     yaw -= (e.clientX - drag.x) * 0.006;
     pitch = Math.max(0.05, Math.min(1.1, pitch + (e.clientY - drag.y) * 0.004));
     drag.x = e.clientX; drag.y = e.clientY;
   });
   const ray = new THREE.Raycaster();
   canvas.addEventListener('pointerup', (e) => {
-    if (drag && Math.hypot(e.clientX - drag.sx, e.clientY - drag.sy) < 8) {
+    if (drag && !posing && Math.hypot(e.clientX - drag.sx, e.clientY - drag.sy) < 8) {
       const r = canvas.getBoundingClientRect();
       ray.setFromCamera(new THREE.Vector2(((e.clientX - r.left) / r.width) * 2 - 1, -((e.clientY - r.top) / r.height) * 2 + 1), camera);
       const hit = ray.intersectObjects(pickables.filter((m) => isIn(m, scene)), false)[0];
@@ -990,6 +958,7 @@ export async function enterStreet({ root, photos, place, lat, lng, onExit }) {
         $('.st-radar').hidden = true;
         $('[data-act="leave-photo"]').hidden = false;
         $('[data-act="exit"]').hidden = true;
+        $('[data-act="avatar"]').hidden = true;
         showToast('🔮 אתם בתוך התמונה. הסתובבו כדי לראות את העומק');
       });
     } catch (e) {
@@ -1015,10 +984,37 @@ export async function enterStreet({ root, photos, place, lat, lng, onExit }) {
       $('.st-radar').hidden = mode !== 'street';
       $('[data-act="leave-photo"]').hidden = true;
       $('[data-act="exit"]').hidden = false;
+      $('[data-act="avatar"]').hidden = false;
     });
   }
+  // Character picker: the camera swings round to face the visitor while it is open.
+  let posing = false, poseAng = 0;
+  const avatarPanel = mountAvatarPanel($('.st-avatar'), {
+    renderer,
+    get: () => avatar,
+    set: (cfg) => { avatar = cfg; dressCharacter(player, avatar); saveAvatar(avatar); },
+  });
+  const openAvatar = () => {
+    if (posing || mode === 'photo') return;
+    if (intro < 1) { intro = 1; $('.st-title').hidden = true; root.classList.remove('st-intro'); }
+    posing = true;
+    keys.clear(); vel.set(0, 0);
+    player.rotation.y = poseAng = yaw;
+    avatarPanel.open();
+    $('.st-avatar').hidden = false;
+    root.classList.add('st-posing');
+  };
+  const closeAvatar = () => {
+    if (!posing) return;
+    posing = false;
+    $('.st-avatar').hidden = true;
+    root.classList.remove('st-posing');
+    yaw = player.rotation.y + Math.PI;
+  };
+  $('.st-avatar').addEventListener('click', (e) => { if (e.target.closest('[data-av="done"]')) closeAvatar(); });
   root.addEventListener('click', (e) => {
     const act = e.target.closest('[data-act]')?.dataset.act;
+    if (act === 'avatar') openAvatar();
     if (act === 'close-photo') closePhoto();
     if (act === 'enter-photo' && viewing) enterPhoto(viewing);
     if (act === 'leave-photo') leavePhoto();
@@ -1096,7 +1092,7 @@ export async function enterStreet({ root, photos, place, lat, lng, onExit }) {
 
     // Movement relative to the camera.
     let ix = 0, iz = 0;
-    if (!viewing) {
+    if (!viewing && !posing) {
       if (keys.has('KeyW') || keys.has('ArrowUp')) iz -= 1;
       if (keys.has('KeyS') || keys.has('ArrowDown')) iz += 1;
       if (keys.has('KeyA') || keys.has('ArrowLeft')) ix -= 1;
@@ -1220,6 +1216,14 @@ export async function enterStreet({ root, photos, place, lat, lng, onExit }) {
     // Third-person camera: eased toward where it wants to be, so collision moves never snap.
     camPos.copy(followPos());
     const headNow = tmp2.copy(player.position); headNow.y += 1.6;
+    if (posing) {
+      // Face the character, framed beside the panel (to its left on wide screens, above it on phones).
+      const H = player.userData.height, ax = Math.sin(poseAng), az = Math.cos(poseAng);
+      const wide = root.clientWidth > 760, side = wide ? H * 0.45 : 0;
+      const back = wide ? 2.3 : 3.4;
+      camPos.set(player.position.x + ax * H * back, H * 0.62, player.position.z + az * H * back);
+      headNow.set(player.position.x + az * side, wide ? H * 0.5 : -H * 0.3, player.position.z - ax * side);
+    }
     if (intro < 1) {
       // Opening shot: circle down from above the venue to behind the visitor.
       intro = Math.min(1, intro + (dt * introSpeed) / INTRO_S);
