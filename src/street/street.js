@@ -222,11 +222,11 @@ export async function enterStreet({ root, photos, place, lat, lng, onExit }) {
       <div class="st-place"><b></b><span></span></div>
     </div>
     <div class="st-prompt" hidden></div>
-    <div class="st-radar"><div class="st-count" hidden></div><canvas class="st-map"></canvas></div>
+    <div class="st-radar"><div class="st-count" hidden></div><canvas class="st-map"></canvas><div class="st-map-hint">הקישו על מקום במפה כדי לקפוץ אליו</div></div>
     <div class="st-toast" hidden></div>
     <div class="st-status" hidden></div>
     <div class="st-title"><b></b><span></span></div>
-    <div class="st-help">${isTouch ? 'ג׳ויסטיק להליכה · גרירה לסיבוב המצלמה · הקשה על תמונה להגדלה' : 'WASD או חצים להליכה · Shift לריצה · גרירה לסיבוב · E או לחיצה על תמונה להגדלה'}</div>
+    <div class="st-help">${isTouch ? 'ג׳ויסטיק להליכה · גרירה לסיבוב המצלמה · הקשה על תמונה להגדלה · הקשה על המפה להגדלה' : 'WASD או חצים להליכה · Shift לריצה · גרירה לסיבוב · E או לחיצה על תמונה להגדלה · M או לחיצה על המפה להגדלה'}</div>
     <div class="st-joy" ${isTouch ? '' : 'hidden'}><div class="st-knob"></div></div>
     <div class="st-photo" hidden><figure><img alt=""><video controls playsinline hidden></video><figcaption><b></b><span></span></figcaption></figure><div class="st-photo-actions"><button class="st-btn gold" data-act="enter-photo">🔮 היכנסו לתמונה</button><button class="st-btn" data-act="close-photo">✕ סגור</button></div></div>
     <div class="st-loading"><div class="st-spinner"></div><div>יורדים לרחוב…</div></div>`;
@@ -750,6 +750,37 @@ export async function enterStreet({ root, photos, place, lat, lng, onExit }) {
   street.add(chevrons);
   const drawMap = makeMinimap($('.st-map'), { radius: R, buildings: solids, roads: area.roads, night });
   let route = null, routeAt = -1, routeFrom = new THREE.Vector3(1e9, 0, 0);
+  // Tap the radar to open it large; tap a place on the large map to jump there.
+  let mapBig = false;
+  const setMapBig = (on) => { mapBig = on; $('.st-radar').classList.toggle('big', on); };
+  const jumpTo = (tx, tz) => {
+    const lim = R - 6, d0 = Math.hypot(tx, tz);
+    if (d0 > lim) { tx *= lim / d0; tz *= lim / d0; }
+    let spot = null;
+    for (let r = 0; r <= 14 && !spot; r += 0.75) {
+      const n = r ? Math.ceil((r * Math.PI * 2) / 1.2) : 1;
+      for (let q = 0; q < n; q++) {
+        const a = (q / n) * Math.PI * 2, x = tx + Math.cos(a) * r, z = tz + Math.sin(a) * r;
+        if (Math.hypot(x, z) < lim && roomy(x, z, 0.9)) { spot = [x, z]; break; }
+      }
+    }
+    if (!spot) { showToast('אי אפשר להגיע לשם'); return; }
+    fadeSwap(() => {
+      player.position.set(spot[0], 0, spot[1]);
+      vel.set(0, 0);
+      routeAt = -1e9;
+    });
+  };
+  $('.st-map').addEventListener('click', (e) => {
+    e.stopPropagation();
+    if (mode !== 'street' || fading) return;
+    if (!mapBig) { setMapBig(true); return; }
+    const p = drawMap.pick(e.clientX, e.clientY);
+    if (!p) return;
+    setMapBig(false);
+    jumpTo(p.x, p.z);
+  });
+  $('.st-radar').addEventListener('click', (e) => { if (mapBig && e.target === $('.st-radar')) setMapBig(false); });
   const target = () => memories.find((m) => !m.found) || { x: markerPos.x, z: markerPos.z, door: true };
   const updateCount = () => {
     const n = memories.filter((m) => m.found).length;
@@ -780,6 +811,7 @@ export async function enterStreet({ root, photos, place, lat, lng, onExit }) {
   const goHall = () => {
     mode = 'hall';
     $('.st-radar').hidden = true;
+    setMapBig(false);
     scene = hall;
     hall.add(player);
     player.position.set(0, 0, HD - 4.5);
@@ -857,7 +889,8 @@ export async function enterStreet({ root, photos, place, lat, lng, onExit }) {
   const onKey = (e) => {
     if (e.type === 'keydown') {
       skipIntro();
-      if (e.code === 'Escape') { if (!$('.st-photo').hidden) closePhoto(); else if (mode === 'photo') leavePhoto(); return; }
+      if (e.code === 'Escape') { if (mapBig) setMapBig(false); else if (!$('.st-photo').hidden) closePhoto(); else if (mode === 'photo') leavePhoto(); return; }
+      if (e.code === 'KeyM' && mode === 'street') { setMapBig(!mapBig); return; }
       if (e.code === 'KeyE' && near) { openPhoto(near); return; }
       if (e.code === 'KeyQ' && near && mode !== 'photo') { enterPhoto(near); return; }
       keys.add(e.code);
@@ -1234,7 +1267,7 @@ export async function enterStreet({ root, photos, place, lat, lng, onExit }) {
       chevrons.count = n;
       chevrons.instanceMatrix.needsUpdate = true;
       chevMat.opacity = 0.65 + 0.3 * Math.sin(now / 250);
-      if ((step.mapTick = (step.mapTick || 0) + 1) % 2 === 0) drawMap({ x: player.position.x, z: player.position.z, yaw, route, memories, door: { x: markerPos.x, z: markerPos.z } });
+      if (mapBig || (step.mapTick = (step.mapTick || 0) + 1) % 2 === 0) drawMap({ x: player.position.x, z: player.position.z, yaw, route, memories, door: { x: markerPos.x, z: markerPos.z }, scale: mapBig ? 0.5 : 1.25 });
     }
 
     // Doors.
