@@ -220,18 +220,22 @@ $('v-close').addEventListener('click', () => { stopTour(); close(); });
 // ---------- Down to the street ----------
 // The globe is how you travel; the place itself is a 3D street you walk through.
 let streetSession = null;
-async function goStreet(photo) {
-  if (streetSession || photo?.lat == null) return;
+async function goStreet(photo, { again = false } = {}) {
+  if ((streetSession && !again) || photo?.lat == null) return;
   stopTour();
   close();
   stopSpin();
   const group = state.photos.filter((p) => p.lat != null && keyOf(p) === keyOf(photo));
-  globe.pointOfView({ lat: photo.lat, lng: photo.lng, altitude: 0.02 }, 2200);
   const modP = import('./street/street.js');
-  await sleep(1900);
+  const typesP = import('./street/placetype.js');
+  if (!again) {
+    globe.pointOfView({ lat: photo.lat, lng: photo.lng, altitude: 0.02 }, 2200);
+    await sleep(1900);
+  }
+  $('dive').classList.remove('out');
   $('dive').hidden = false;
-  await sleep(450);
-  const { enterStreet } = await modP;
+  await sleep(again ? 250 : 450);
+  const [{ enterStreet }, types] = await Promise.all([modP, typesP]);
   $('street').hidden = false;
   document.body.classList.add('in-street');
   globe.pauseAnimation();
@@ -241,6 +245,13 @@ async function goStreet(photo) {
     place: photo.place,
     lat: photo.lat,
     lng: photo.lng,
+    // The kind of place: the visitor's earlier choice for this spot, else detected on the way in.
+    type: types.savedType(photo.lat, photo.lng),
+    onTypeChange: (t) => {
+      types.saveType(photo.lat, photo.lng, t);
+      streetSession = null;
+      goStreet(photo, { again: true });
+    },
     onExit: () => {
       streetSession = null;
       // Fade back out to the globe instead of cutting.
@@ -258,10 +269,10 @@ async function goStreet(photo) {
     $('street').hidden = true;
     document.body.classList.remove('in-street');
     globe.resumeAnimation();
-    toast('לא הצלחנו לבנות את הרחוב. נסו שוב.');
+    toast('לא הצלחנו לבנות את המקום. נסו שוב.');
     return null;
   });
-  // Reveal the street with a fade rather than a cut.
+  // Reveal the place with a fade rather than a cut.
   $('dive').classList.add('out');
   setTimeout(() => { $('dive').hidden = true; $('dive').classList.remove('out'); }, 700);
   window.__street = streetSession; // handy for debugging in the console

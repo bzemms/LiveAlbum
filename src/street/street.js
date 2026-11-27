@@ -8,6 +8,19 @@ import { makeGrid } from './navgrid.js';
 import { makeMinimap } from './minimap.js';
 import { peopleFrom } from './figures.js';
 import { depthOf } from './depth.js';
+import { TYPES, scoreMap, scorePhotos, decide } from './placetype.js';
+import { generated } from './osm.js';
+
+// How each kind of place opens. `door`: the label of a door into an interior (none: an open place).
+// `fill`: what to build when the map has no buildings ('city': a generated block, 'open': nothing).
+const SCENES = {
+  event: { door: 'כניסה לאירוע', inside: 'event', exit: 'יציאה לרחוב', fill: 'city', title: 'האירוע' },
+  restaurant: { door: 'כניסה למסעדה', inside: 'restaurant', exit: 'יציאה לרחוב', fill: 'city', title: 'המסעדה' },
+  home: { door: 'כניסה הביתה', inside: 'home', exit: 'יציאה החוצה', fill: 'city', title: 'הבית' },
+  city: { door: null, fill: 'city' },
+  beach: { door: null, fill: 'open', ground: [0xe8d6a4, 0x8a7f6a], sea: true },
+  nature: { door: null, fill: 'open', ground: [0x93bf6c, 0x415c3e], forest: true },
+};
 
 const DAY = {
   sky: 0xa9d3f0, fog: 0xc9e2f2, ground: 0xd8d2c4, road: 0x55595f, foot: 0xc2bba9,
@@ -211,16 +224,17 @@ function makeStandee(fig) {
 }
 
 // ---------- Main ----------
-export async function enterStreet({ root, photos, place, lat, lng, onExit }) {
+export async function enterStreet({ root, photos, place, lat, lng, onExit, type: wantType = null, onTypeChange = null }) {
   const night = photos.filter((p) => p.date && (p.date.getHours() >= 18 || p.date.getHours() < 6)).length > photos.length / 2;
-  const T = night ? NIGHT : DAY;
+  let T = night ? NIGHT : DAY;
 
   root.innerHTML = `
     <canvas class="st-canvas"></canvas>
     <div class="st-top">
       <div class="st-actions"><button class="st-btn" data-act="exit">🌍 חזרה לגלובוס</button><button class="st-btn gold" data-act="leave-photo" hidden>↩ יציאה מהתמונה</button></div>
-      <div class="st-place"><b></b><span></span></div>
+      <div class="st-place"><b></b><span></span><button class="st-type" data-act="type" type="button"></button></div>
     </div>
+    <div class="st-types" hidden></div>
     <div class="st-prompt" hidden></div>
     <div class="st-radar"><div class="st-count" hidden></div><canvas class="st-map"></canvas></div>
     <div class="st-toast" hidden></div>
@@ -255,13 +269,55 @@ export async function enterStreet({ root, photos, place, lat, lng, onExit }) {
   sun.shadow.bias = -0.0005;
   street.add(sun, sun.target);
 
-  const area = await loadArea(lat, lng);
-  $('.st-place span').textContent = area.source === 'osm' ? 'מבנים ורחובות לפי OpenStreetMap' : 'שכונה לדוגמה: מפת האזור לא נטענה';
+  let area = await loadArea(lat, lng);
+  // The kind of place: the visitor's choice, else a guess from the map and the photos.
+  let type = TYPES[wantType] ? wantType : null;
+  const autoType = !type;
+  if (!type) {
+    $('.st-loading div:last-child').textContent = 'מזהים איזה מקום זה…';
+    let photoScores = null;
+    try { photoScores = await Promise.race([scorePhotos(photos), new Promise((_, rej) => setTimeout(() => rej(new Error('slow')), 8000))]); } catch { /* map only */ }
+    type = decide(scoreMap(area), photoScores);
+    $('.st-loading div:last-child').textContent = 'יורדים לרחוב…';
+  }
+  const CFG = SCENES[type];
+  const mapped = area.source === 'osm';
+  // A street-type place with no mapped buildings gets a generated block; open places stay open.
+  if (CFG.fill === 'city' && area.buildings.length < 3) area = { ...generated(Math.round(Math.abs(lat * 1000 + lng * 1000))), source: 'generated' };
+  $('.st-place span').textContent = mapped ? 'לפי מפת OpenStreetMap' : area.source === 'generated' ? 'שכונה לדוגמה: אין מפה לאזור' : 'אין מפה לאזור';
+  $('.st-type').textContent = `${TYPES[type].icon} ${TYPES[type].label}${autoType ? ' (זוהה)' : ''} ▾`;
+  // Open places: grass or sand underfoot, and the sky a little brighter.
+  if (CFG.ground) T = { ...T, ground: CFG.ground[night ? 1 : 0] };
   const R = 260;
   const ground = new THREE.Mesh(new THREE.CircleGeometry(R + 120, 64), new THREE.MeshLambertMaterial({ color: T.ground }));
   ground.rotation.x = -Math.PI / 2;
   ground.receiveShadow = true;
   street.add(ground);
+
+  // Beaches: if the map has no water near the spot, put the sea on the side away from the streets.
+  let seaDir = null, seaEdge = 0;
+  if (CFG.sea && !(area.water || []).some((r) => r.some(([x, z]) => Math.hypot(x, z) < 220))) {
+    let cx = 0, cz = 0, n = 0;
+    for (const b of area.buildings) for (const [x, z] of b.pts) { cx += x; cz += z; n++; }
+    for (const r of area.roads) for (const [x, z] of r.pts) { cx += x; cz += z; n++; }
+    seaDir = new THREE.Vector2(n ? -cx / n : -1, n ? -cz / n : 0);
+    if (seaDir.length() < 2) seaDir.set(-1, 0);
+    seaDir.normalize();
+    seaEdge = 24;
+    const seaGeo = new THREE.PlaneGeometry(1400, 1400);
+    seaGeo.rotateX(-Math.PI / 2);
+    seaGeo.rotateY(-Math.atan2(seaDir.y, seaDir.x));
+    const sea = new THREE.Mesh(seaGeo, new THREE.MeshLambertMaterial({ color: night ? 0x1d3a63 : 0x2f8fc9 }));
+    sea.position.set(seaDir.x * (seaEdge + 700), 0.04, seaDir.y * (seaEdge + 700));
+    street.add(sea);
+    const foamGeo = new THREE.PlaneGeometry(1.6, 1400);
+    foamGeo.rotateX(-Math.PI / 2);
+    foamGeo.rotateY(-Math.atan2(seaDir.y, seaDir.x));
+    const foam = new THREE.Mesh(foamGeo, new THREE.MeshBasicMaterial({ color: 0xf4fbff, transparent: true, opacity: 0.8 }));
+    foam.position.set(seaDir.x * seaEdge, 0.06, seaDir.y * seaEdge);
+    street.add(foam);
+  }
+  const inSea = (x, z) => !!seaDir && x * seaDir.x + z * seaDir.y > seaEdge - 0.6;
 
   // Parks and water as flat shapes on the ground.
   for (const [rings, color, y] of [[area.parks || [], night ? 0x3d5a40 : 0x9cc57f, 0.008], [area.water || [], night ? 0x24406a : 0x6fb2dc, 0.012]]) {
@@ -339,7 +395,8 @@ export async function enterStreet({ root, photos, place, lat, lng, onExit }) {
     }
     venue = best?.b;
   }
-  if (!venue) {
+  if (!CFG.door) venue = null; // open places and city walks have no door to walk into
+  else if (!venue) {
     venue = { id: -1, pts: [[-8, -16], [8, -16], [8, -6], [-8, -6]], h: 6, name: null };
     venue.box = bbox(venue.pts);
     solids.push(venue);
@@ -375,10 +432,10 @@ export async function enterStreet({ root, photos, place, lat, lng, onExit }) {
     }
     return false;
   };
-  const solidNear = (x, z, r) => nearbyHit(x, z, r, (b) => inPoly(x, z, b.pts) || (r > 0 && closestOnPoly(x, z, b.pts).d < r));
+  const solidNear = (x, z, r) => inSea(x, z) || nearbyHit(x, z, r, (b) => inPoly(x, z, b.pts) || (r > 0 && closestOnPoly(x, z, b.pts).d < r));
 
   // A named place inside the venue (from the map's points of interest) names the venue.
-  if (!venue.name) venue.name = (area.pois || []).find((p) => inPoly(p.x, p.z, venue.pts))?.name || null;
+  if (venue && !venue.name) venue.name = (area.pois || []).find((p) => p.name && inPoly(p.x, p.z, venue.pts))?.name || null;
 
   const bGeos = [];
   const col = new THREE.Color();
@@ -413,8 +470,9 @@ export async function enterStreet({ root, photos, place, lat, lng, onExit }) {
   }
 
   // Door on the venue wall facing the street, and the outward direction from it.
-  let doorAt = closestOnPoly(focus[0], focus[1], venue.pts);
-  if (doorAt.len < 3) {
+  // Without a venue, the "door" is just the spot where the photos gather, facing along the street.
+  let doorAt = venue ? closestOnPoly(focus[0], focus[1], venue.pts) : { x: focus[0], z: focus[1], ex: road ? road.dir.x : 1, ez: road ? road.dir.y : 0, len: 10 };
+  if (venue && doorAt.len < 3) {
     // Too narrow a wall for a door: use the longest wall instead.
     let longest = null;
     venue.pts.forEach(([ax, az], i) => {
@@ -426,7 +484,7 @@ export async function enterStreet({ root, photos, place, lat, lng, onExit }) {
   }
   const edge = new THREE.Vector2(doorAt.ex, doorAt.ez).normalize();
   let out = new THREE.Vector2(-edge.y, edge.x);
-  if (inPoly(doorAt.x + out.x * 0.5, doorAt.z + out.y * 0.5, venue.pts)) out.negate();
+  if (venue && inPoly(doorAt.x + out.x * 0.5, doorAt.z + out.y * 0.5, venue.pts)) out.negate();
   const door = new THREE.Vector3(doorAt.x, 0, doorAt.z);
   const facing = Math.atan2(out.x, out.y); // rotation.y that makes +z face `out`
 
@@ -440,16 +498,16 @@ export async function enterStreet({ root, photos, place, lat, lng, onExit }) {
   const inner = new THREE.Mesh(new THREE.PlaneGeometry(1.84, 2.62), new THREE.MeshBasicMaterial({ color: night ? 0xffb85c : 0x3a2a18, transparent: true, opacity: 0.92 }));
   inner.position.set(0, 1.31, 0.01);
   doorGroup.add(inner);
-  const sign = textSprite('כניסה לאירוע', { size: 54, color: '#241a05', bg: '#ffd678', scale: 1.4 });
+  const sign = textSprite(CFG.door || '', { size: 54, color: '#241a05', bg: '#ffd678', scale: 1.4 });
   sign.position.set(0, 3.45, 0.2);
   doorGroup.add(sign);
-  street.add(doorGroup);
+  if (CFG.door) street.add(doorGroup);
   const markerMat = new THREE.MeshBasicMaterial({ color: 0xffd34d, transparent: true, opacity: 0.35, depthWrite: false, side: THREE.DoubleSide });
   const marker = new THREE.Mesh(new THREE.CylinderGeometry(1.1, 1.1, 1.6, 32, 1, true), markerMat);
   const markerPos = door.clone().add(new THREE.Vector3(out.x * 1.6, 0.8, out.y * 1.6));
   marker.position.copy(markerPos);
-  street.add(marker);
-  if (place) {
+  if (CFG.door) street.add(marker);
+  if (place && venue) {
     const name = textSprite(venue.name || place, { size: 64, scale: 1.8 });
     name.position.copy(door).add(new THREE.Vector3(out.x * 0.5, Math.min(venue.h + 2.2, 14), out.y * 0.5));
     street.add(name);
@@ -530,6 +588,14 @@ export async function enterStreet({ root, photos, place, lat, lng, onExit }) {
       }
     }
   }
+  // Few or no roads (a beach, a forest): add spots on open ground around the place.
+  if (roadSpots.length < (streetPhotos.length - nearCount) * 3) {
+    for (let i = 0; i < 90; i++) {
+      const ang = i * 2.399, rr = 22 + (i % 9) * 7;
+      const x = door.x + Math.cos(ang) * rr, z = door.z + Math.sin(ang) * rr;
+      if (clearAt(x, z, 2.5)) roadSpots.push({ x, z, d: rr, dir: ang });
+    }
+  }
   // Spread them out: each next spot is the one farthest from those already taken (within reach).
   const scattered = [];
   const want = streetPhotos.length - nearCount;
@@ -594,6 +660,45 @@ export async function enterStreet({ root, photos, place, lat, lng, onExit }) {
       }
     }
   }
+  const nearMemory = (x, z, r) => memories.some((m) => Math.hypot(m.x - x, m.z - z) < r) || Math.hypot(x - door.x, z - door.z) < r + 4;
+  if (CFG.forest) {
+    // Woods around the trail, thinning out near the photos.
+    for (let i = 0; i < 320 && treeSpots.length < 520; i++) {
+      const ang = i * 2.399 + 0.3, rr = 7 + Math.sqrt(i / 320) * 170;
+      const x = Math.cos(ang) * rr, z = Math.sin(ang) * rr;
+      if (!blocked(x, z) && !nearMemory(x, z, 4.5)) treeSpots.push([x, z]);
+    }
+    const hills = new THREE.InstancedMesh(new THREE.ConeGeometry(1, 1, 7), new THREE.MeshLambertMaterial({ color: night ? 0x34503a : 0x6f9a55, flatShading: true }), 14);
+    const hd = new THREE.Object3D();
+    for (let i = 0; i < 14; i++) {
+      const ang = (i / 14) * Math.PI * 2 + (i % 3) * 0.2, rr = 200 + (i % 4) * 25;
+      hd.position.set(Math.cos(ang) * rr, 0, Math.sin(ang) * rr);
+      hd.scale.set(60 + (i % 5) * 14, 26 + (i % 4) * 12, 60 + (i % 3) * 18);
+      hd.position.y = hd.scale.y / 2;
+      hd.updateMatrix();
+      hills.setMatrixAt(i, hd.matrix);
+    }
+    street.add(hills);
+  }
+  if (seaDir) {
+    // Beach umbrellas along the shore.
+    const tx = -seaDir.y, tz = seaDir.x;
+    const colors = [0xe2445c, 0xf2b134, 0x2f9fd8, 0x4caf50, 0xffffff];
+    for (let i = -5; i <= 5; i++) {
+      const along = i * 9 + (i % 2) * 3, inland = 7 + (Math.abs(i) % 3) * 4;
+      const x = seaDir.x * (seaEdge - inland) + tx * along, z = seaDir.y * (seaEdge - inland) + tz * along;
+      if (blocked(x, z) || nearMemory(x, z, 3)) continue;
+      const u = new THREE.Group();
+      const pole = new THREE.Mesh(new THREE.CylinderGeometry(0.04, 0.04, 2.4, 6), new THREE.MeshLambertMaterial({ color: 0xdddddd }));
+      pole.position.y = 1.2;
+      const top = new THREE.Mesh(new THREE.ConeGeometry(1.3, 0.55, 10), new THREE.MeshLambertMaterial({ color: colors[(i + 5) % colors.length], flatShading: true }));
+      top.position.y = 2.45;
+      u.add(pole, top);
+      u.position.set(x, 0, z);
+      u.traverse((o) => { if (o.isMesh) o.castShadow = true; });
+      street.add(u);
+    }
+  }
   const dummy = new THREE.Object3D();
   const instanced = (geo, mat, spots, y, scaleRand = 0) => {
     if (!spots.length) return;
@@ -615,71 +720,123 @@ export async function enterStreet({ root, photos, place, lat, lng, onExit }) {
   const BODY = 0.35;
   const blockedAt = (x, z) => solidNear(x, z, BODY);
 
-  // ----- Hall scene -----
+  // ----- Interior: an event hall, a restaurant or a living room -----
+  const inside = CFG.inside || 'event';
   const hall = new THREE.Scene();
   hall.background = new THREE.Color(0x0e1222);
-  const HW = 13, HD = 8, HH = 5.2;
-  hall.add(new THREE.HemisphereLight(0xffe7c4, 0x3a2a1c, 0.9));
+  const [HW, HD, HH] = inside === 'home' ? [7, 6, 3.2] : inside === 'restaurant' ? [9.5, 7, 3.8] : [13, 8, 5.2];
+  hall.add(new THREE.HemisphereLight(0xffe7c4, 0x3a2a1c, inside === 'event' ? 0.9 : 1.15));
   const floor = new THREE.Mesh(new THREE.PlaneGeometry(HW * 2, HD * 2), new THREE.MeshLambertMaterial({ map: planksTexture() }));
+  floor.material.map.repeat.set(HW / 2.2, HD / 2);
   floor.rotation.x = -Math.PI / 2;
   floor.receiveShadow = true;
   hall.add(floor);
-  const wallMat = new THREE.MeshLambertMaterial({ color: 0xf1e9dc, side: THREE.BackSide });
-  const room = new THREE.Mesh(new THREE.BoxGeometry(HW * 2, HH, HD * 2), wallMat);
+  const wallColor = inside === 'home' ? 0xf3ece1 : inside === 'restaurant' ? 0xe9cfb6 : 0xf1e9dc;
+  const room = new THREE.Mesh(new THREE.BoxGeometry(HW * 2, HH, HD * 2), new THREE.MeshLambertMaterial({ color: wallColor, side: THREE.BackSide }));
   room.position.y = HH / 2 - 0.01;
   hall.add(room);
-  // String lights across the ceiling, like an evening terrace.
-  const bulbGeo = new THREE.SphereGeometry(0.07, 8, 6);
-  const bulbMat = new THREE.MeshBasicMaterial({ color: 0xfff0c2 });
-  const bulbs = [];
-  for (let line = -2; line <= 2; line++) {
-    const z = line * 3.2;
-    for (let x = -HW + 0.6; x <= HW - 0.6; x += 0.9) {
-      const sag = 0.7 * (1 - (x / HW) ** 2);
-      bulbs.push([x, HH - 0.3 - sag, z]);
-    }
-  }
-  const bulbMesh = new THREE.InstancedMesh(bulbGeo, bulbMat, bulbs.length);
-  bulbs.forEach(([x, y, z], i) => { dummy.position.set(x, y, z); dummy.scale.setScalar(1); dummy.rotation.set(0, 0, 0); dummy.updateMatrix(); bulbMesh.setMatrixAt(i, dummy.matrix); });
-  hall.add(bulbMesh);
-  for (const [x, z] of [[-7, -3], [0, 0], [7, 3], [-7, 4], [7, -4]]) {
-    const l = new THREE.PointLight(0xffd59a, 14, 16, 1.3);
-    l.position.set(x, HH - 1, z);
+  const tables = [];    // anchor points the cardboard figures gather around
+  const obstacles = []; // [x, z, radius] the visitor walks around
+  const box = (w, h, d, color, x, y, z, ry = 0) => {
+    const m = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), new THREE.MeshLambertMaterial({ color }));
+    m.position.set(x, y, z);
+    m.rotation.y = ry;
+    m.castShadow = true;
+    hall.add(m);
+    return m;
+  };
+  const lamp = (x, z, y, intensity = 10, range = 9) => {
+    const l = new THREE.PointLight(0xffd59a, intensity, range, 1.3);
+    l.position.set(x, y, z);
     hall.add(l);
-  }
-  // Round tables with white cloths and chairs, as at a family event.
-  const tables = [[-7, -3.2], [-7, 3.2], [7, -3.2], [7, 3.2], [0, -4.2]];
-  const cloth = new THREE.MeshLambertMaterial({ color: 0xf7f5f0 });
-  const chairMat = new THREE.MeshLambertMaterial({ color: 0xffffff });
-  for (const [x, z] of tables) {
-    const t = new THREE.Mesh(new THREE.CylinderGeometry(1.15, 1.25, 0.78, 28), cloth);
-    t.position.set(x, 0.39, z);
-    t.castShadow = true;
-    hall.add(t);
-    for (let a = 0; a < 8; a++) {
-      const ang = (a / 8) * Math.PI * 2;
-      const c = new THREE.Group();
-      const seat = new THREE.Mesh(new THREE.BoxGeometry(0.42, 0.06, 0.42), chairMat);
-      seat.position.y = 0.46;
-      const back = new THREE.Mesh(new THREE.BoxGeometry(0.42, 0.55, 0.05), chairMat);
-      back.position.set(0, 0.75, 0.2);
-      c.add(seat, back);
-      c.position.set(x + Math.cos(ang) * 1.65, 0, z + Math.sin(ang) * 1.65);
-      c.rotation.y = -ang + Math.PI / 2;
-      hall.add(c);
+  };
+
+  if (inside === 'event') {
+    // String lights across the ceiling, like an evening terrace.
+    const bulbGeo = new THREE.SphereGeometry(0.07, 8, 6);
+    const bulbMat = new THREE.MeshBasicMaterial({ color: 0xfff0c2 });
+    const bulbs = [];
+    for (let line = -2; line <= 2; line++) {
+      const z = line * 3.2;
+      for (let x = -HW + 0.6; x <= HW - 0.6; x += 0.9) bulbs.push([x, HH - 0.3 - 0.7 * (1 - (x / HW) ** 2), z]);
     }
+    const bulbMesh = new THREE.InstancedMesh(bulbGeo, bulbMat, bulbs.length);
+    bulbs.forEach(([x, y, z], i) => { dummy.position.set(x, y, z); dummy.scale.setScalar(1); dummy.rotation.set(0, 0, 0); dummy.updateMatrix(); bulbMesh.setMatrixAt(i, dummy.matrix); });
+    hall.add(bulbMesh);
+    for (const [x, z] of [[-7, -3], [0, 0], [7, 3], [-7, 4], [7, -4]]) lamp(x, z, HH - 1, 14, 16);
+    // Round tables with white cloths and chairs, as at a family event.
+    const cloth = new THREE.MeshLambertMaterial({ color: 0xf7f5f0 });
+    const chairMat = new THREE.MeshLambertMaterial({ color: 0xffffff });
+    for (const [x, z] of [[-7, -3.2], [-7, 3.2], [7, -3.2], [7, 3.2], [0, -4.2]]) {
+      tables.push([x, z]);
+      obstacles.push([x, z, 1.95]);
+      const t = new THREE.Mesh(new THREE.CylinderGeometry(1.15, 1.25, 0.78, 28), cloth);
+      t.position.set(x, 0.39, z);
+      t.castShadow = true;
+      hall.add(t);
+      for (let a = 0; a < 8; a++) {
+        const ang = (a / 8) * Math.PI * 2;
+        const c = new THREE.Group();
+        const seat = new THREE.Mesh(new THREE.BoxGeometry(0.42, 0.06, 0.42), chairMat);
+        seat.position.y = 0.46;
+        const back = new THREE.Mesh(new THREE.BoxGeometry(0.42, 0.55, 0.05), chairMat);
+        back.position.set(0, 0.75, 0.2);
+        c.add(seat, back);
+        c.position.set(x + Math.cos(ang) * 1.65, 0, z + Math.sin(ang) * 1.65);
+        c.rotation.y = -ang + Math.PI / 2;
+        hall.add(c);
+      }
+    }
+  } else if (inside === 'restaurant') {
+    // Small square tables for two and four, a counter along the back, pendant lamps.
+    for (const [x, z] of [[-5.5, -2.5], [-5.5, 2.2], [0, 0.5], [5.5, -2.5], [5.5, 2.2], [0, -3.6]]) {
+      tables.push([x, z]);
+      obstacles.push([x, z, 1.35]);
+      box(1.1, 0.06, 1.1, 0x6e4a30, x, 0.76, z);
+      box(0.12, 0.74, 0.12, 0x3b2a1e, x, 0.37, z);
+      for (const [dx, dz, ry] of [[0, 0.85, Math.PI], [0, -0.85, 0], [0.85, 0, -Math.PI / 2], [-0.85, 0, Math.PI / 2]]) {
+        box(0.42, 0.05, 0.42, 0x2c2c30, x + dx, 0.46, z + dz, ry);
+        const back = box(0.42, 0.5, 0.05, 0x2c2c30, x + dx * 1.22, 0.72, z + dz * 1.22, ry);
+        back.rotation.y = ry;
+      }
+      const shade = new THREE.Mesh(new THREE.ConeGeometry(0.32, 0.3, 16, 1, true), new THREE.MeshBasicMaterial({ color: 0xffcf7a, side: THREE.DoubleSide }));
+      shade.position.set(x, HH - 1.1, z);
+      hall.add(shade);
+      lamp(x, z, HH - 1.3, 6, 6);
+    }
+    box(7, 1.1, 0.8, 0x7a5236, -HW + 4.2, 0.55, -HD + 0.6);
+    obstacles.push([-HW + 2.4, -HD + 0.6, 1.4], [-HW + 4.2, -HD + 0.6, 1.4], [-HW + 6, -HD + 0.6, 1.4]);
+  } else {
+    // A living room: rug, sofa, armchair, coffee table, bookshelf and warm lamps.
+    const rug = new THREE.Mesh(new THREE.PlaneGeometry(5.2, 3.6), new THREE.MeshLambertMaterial({ color: 0x9c4f3e }));
+    rug.rotation.x = -Math.PI / 2;
+    rug.position.set(0, 0.012, -0.6);
+    hall.add(rug);
+    box(3.4, 0.45, 1, 0x4a5d7a, 0, 0.32, -3.4);
+    box(3.4, 0.7, 0.25, 0x4a5d7a, 0, 0.75, -3.85);
+    box(0.25, 0.6, 1, 0x4a5d7a, -1.75, 0.5, -3.4);
+    box(0.25, 0.6, 1, 0x4a5d7a, 1.75, 0.5, -3.4);
+    box(1.1, 0.42, 0.9, 0x8a6a4a, -3.4, 0.3, -0.8, 0.6);
+    box(1.6, 0.4, 0.8, 0x6e4a30, 0, 0.22, -1.4);
+    box(2.4, 2.4, 0.4, 0x6e4a30, HW - 1.6, 1.2, -HD + 0.25);
+    for (const [x, z] of [[0, -3.4], [-3.4, -0.8], [0, -1.4]]) tables.push([x, z]);
+    obstacles.push([0, -3.4, 1.9], [-3.4, -0.8, 1], [0, -1.4, 1.1], [HW - 1.6, -HD + 0.25, 1.4]);
+    lamp(-HW + 1.2, -HD + 1.2, 1.9, 9, 10);
+    lamp(HW - 1.4, 1.5, 2.2, 7, 9);
+    lamp(0, 0, HH - 0.4, 6, 10);
   }
   // Photos on the walls: back wall, then the side walls, two rows when there are many.
   const slots = [];
   const addRow = (y) => {
-    for (let x = -HW + 2.4; x <= HW - 2.4; x += 3.6) slots.push({ pos: [x, y, -HD + 0.06], rot: 0 });
+    for (let x = -HW + 2.4; x <= HW - 2.4; x += 3.6) if (inside !== 'home' || x < HW - 3.4) slots.push({ pos: [x, y, -HD + 0.06], rot: 0 });
     for (let z = -HD + 2.6; z <= HD - 2.6; z += 3.4) slots.push({ pos: [-HW + 0.06, y, z], rot: Math.PI / 2 });
     for (let z = -HD + 2.6; z <= HD - 2.6; z += 3.4) slots.push({ pos: [HW - 0.06, y, z], rot: -Math.PI / 2 });
   };
-  addRow(2.05);
-  if (photos.length > slots.length) addRow(4.0);
+  addRow(inside === 'event' ? 2.05 : 1.75);
+  if (photos.length > slots.length && HH > 4.5) addRow(4.0);
   photos.slice(0, slots.length).forEach((p, i) => {
-    const { group, pick, video } = photoFrame(p, photos.length > 14 ? 1.7 : 2.2, { posts: false, loader, videoFor, maxH: photos.length > 14 ? 1.5 : 2.2 });
+    const big = inside === 'event' && photos.length <= 14;
+    const { group, pick, video } = photoFrame(p, big ? 2.2 : 1.6, { posts: false, loader, videoFor, maxH: big ? 2.2 : 1.4 });
     if (video) videoFrames.push({ video, group });
     group.position.set(...slots[i].pos);
     group.rotation.y = slots[i].rot;
@@ -687,12 +844,12 @@ export async function enterStreet({ root, photos, place, lat, lng, onExit }) {
     pickables.push(...pick);
     const spot = new THREE.SpotLight(0xfff1d6, 18, 6, 0.5, 0.6, 1.2);
     const dir = new THREE.Vector3(0, 0, 1).applyAxisAngle(new THREE.Vector3(0, 1, 0), slots[i].rot);
-    spot.position.set(slots[i].pos[0] + dir.x * 1.6, HH - 0.6, slots[i].pos[2] + dir.z * 1.6);
+    spot.position.set(slots[i].pos[0] + dir.x * 1.6, HH - 0.3, slots[i].pos[2] + dir.z * 1.6);
     spot.target = group;
     hall.add(spot);
   });
-  const title = textSprite(`${place || 'האירוע'}${photos[0]?.date ? ' · ' + dateFmt.format(photos[0].date) : ''}`, { size: 60, scale: 2 });
-  title.position.set(0, HH - 1.2, -HD + 0.4);
+  const title = textSprite(`${(inside === 'home' ? CFG.title : place) || CFG.title || ''}${photos[0]?.date ? ' · ' + dateFmt.format(photos[0].date) : ''}`, { size: 60, scale: 2 });
+  title.position.set(0, HH - (inside === "event" ? 1.2 : 0.45), -HD + 0.4);
   hall.add(title);
   // Exit door on the front wall.
   const exit = new THREE.Group();
@@ -704,12 +861,12 @@ export async function enterStreet({ root, photos, place, lat, lng, onExit }) {
     m.position.set(x, y, 0);
     exit.add(m);
   }
-  const exitSign = textSprite('יציאה לרחוב', { size: 54, scale: 1.3 });
-  exitSign.position.set(0, 3.4, 0.2);
+  const exitSign = textSprite(CFG.exit || 'יציאה', { size: 54, scale: 1.3 });
+  exitSign.position.set(0, Math.min(3.4, HH - 0.35), 0.2);
   exit.add(exitSign);
   hall.add(exit);
   const exitPos = new THREE.Vector3(0, 0, HD - 1.4);
-  const hallBlocked = (x, z) => Math.abs(x) > HW - BODY - 0.1 || Math.abs(z) > HD - BODY - 0.1 || tables.some(([tx, tz]) => Math.hypot(x - tx, z - tz) < 1.95);
+  const hallBlocked = (x, z) => Math.abs(x) > HW - BODY - 0.1 || Math.abs(z) > HD - BODY - 0.1 || obstacles.some(([ox, oz, r]) => Math.hypot(x - ox, z - oz) < r);
 
   // ----- Player -----
   const player = makeCharacter();
@@ -750,7 +907,7 @@ export async function enterStreet({ root, photos, place, lat, lng, onExit }) {
   street.add(chevrons);
   const drawMap = makeMinimap($('.st-map'), { radius: R, buildings: solids, roads: area.roads, night });
   let route = null, routeAt = -1, routeFrom = new THREE.Vector3(1e9, 0, 0);
-  const target = () => memories.find((m) => !m.found) || { x: markerPos.x, z: markerPos.z, door: true };
+  const target = () => memories.find((m) => !m.found) || (CFG.door ? { x: markerPos.x, z: markerPos.z, door: true } : null);
   const updateCount = () => {
     const n = memories.filter((m) => m.found).length;
     $('.st-count').textContent = memories.length ? `📸 זכרונות שנמצאו ${n}/${memories.length}` : '';
@@ -924,7 +1081,7 @@ export async function enterStreet({ root, photos, place, lat, lng, onExit }) {
     updateCount();
     const left = memories.filter((q) => !q.found).length;
     if (left) showToast(`✨ מצאתם זיכרון! נשארו עוד ${left}`);
-    else if (!allFoundShown) { allFoundShown = true; showToast('🎉 מצאתם את כל הזכרונות! עכשיו לאירוע, החץ מראה את הדרך', 5000); }
+    else if (!allFoundShown) { allFoundShown = true; showToast(CFG.door ? `🎉 מצאתם את כל הזכרונות! עכשיו פנימה: ${CFG.door}` : '🎉 מצאתם את כל הזכרונות במקום הזה!', 5000); }
     routeAt = -1;
   }
   function openPhoto(p) {
@@ -1062,6 +1219,25 @@ export async function enterStreet({ root, photos, place, lat, lng, onExit }) {
   root.addEventListener('click', (e) => {
     const act = e.target.closest('[data-act]')?.dataset.act;
     if (act === 'close-photo') closePhoto();
+    if (act === 'type') {
+      const menu = $('.st-types');
+      if (!menu.hidden) { menu.hidden = true; return; }
+      menu.replaceChildren(...[['', '✨ זיהוי אוטומטי'], ...Object.entries(TYPES).map(([k, v]) => [k, `${v.icon} ${v.label}`])].map(([k, label]) => {
+        const b = document.createElement('button');
+        b.type = 'button';
+        b.className = 'st-btn' + ((k || null) === (autoType ? null : type) ? ' gold' : '');
+        b.dataset.act = 'set-type';
+        b.dataset.type = k;
+        b.textContent = label;
+        return b;
+      }));
+      menu.hidden = false;
+    }
+    if (act === 'set-type') {
+      $('.st-types').hidden = true;
+      const t = e.target.closest('[data-type]').dataset.type || null;
+      if (onTypeChange && t !== (autoType ? null : type)) { stop({ quiet: true }); onTypeChange(t); }
+    }
     if (act === 'enter-photo' && viewing) enterPhoto(viewing);
     if (act === 'leave-photo') leavePhoto();
     if (act === 'exit') stop();
@@ -1207,14 +1383,15 @@ export async function enterStreet({ root, photos, place, lat, lng, onExit }) {
         if (!m.found) m.beam.material.opacity = 0.16 + 0.1 * Math.sin(now / 400 + m.x);
       }
       const t = target();
-      if (now - routeAt > 500 && (player.position.distanceTo(routeFrom) > 1.5 || now - routeAt > 3000)) {
+      if (!t) route = null;
+      else if (now - routeAt > 500 && (player.position.distanceTo(routeFrom) > 1.5 || now - routeAt > 3000)) {
         route = grid.path(player.position.x, player.position.z, t.x, t.z);
         routeAt = now;
         routeFrom.copy(player.position);
       }
       // Chevrons every 2.2 m along the route, drifting forward.
       let n = 0;
-      if (route && Math.hypot(t.x - player.position.x, t.z - player.position.z) > 3) {
+      if (route && t && Math.hypot(t.x - player.position.x, t.z - player.position.z) > 3) {
         const pts = [[player.position.x, player.position.z], ...route.slice(1)];
         let carry = 1.6 + ((now / 900) % 1) * 2.2;
         for (let q = 0; q < pts.length - 1 && n < MAXCHEV; q++) {
@@ -1234,12 +1411,12 @@ export async function enterStreet({ root, photos, place, lat, lng, onExit }) {
       chevrons.count = n;
       chevrons.instanceMatrix.needsUpdate = true;
       chevMat.opacity = 0.65 + 0.3 * Math.sin(now / 250);
-      if ((step.mapTick = (step.mapTick || 0) + 1) % 2 === 0) drawMap({ x: player.position.x, z: player.position.z, yaw, route, memories, door: { x: markerPos.x, z: markerPos.z } });
+      if ((step.mapTick = (step.mapTick || 0) + 1) % 2 === 0) drawMap({ x: player.position.x, z: player.position.z, yaw, route, memories, door: CFG.door ? { x: markerPos.x, z: markerPos.z } : null });
     }
 
     // Doors.
     if (cooldown === 0) {
-      if (mode === 'street' && Math.hypot(player.position.x - markerPos.x, player.position.z - markerPos.z) < 1.1) fadeSwap(() => { goHall(); vel.set(0, 0); });
+      if (mode === 'street' && CFG.door && Math.hypot(player.position.x - markerPos.x, player.position.z - markerPos.z) < 1.1) fadeSwap(() => { goHall(); vel.set(0, 0); });
       else if (mode === 'hall' && Math.hypot(player.position.x - exitPos.x, player.position.z - exitPos.z) < 1.0) fadeSwap(() => { goStreet(); vel.set(0, 0); });
     }
     marker.material.opacity = 0.25 + 0.15 * Math.sin(now / 300);
@@ -1253,9 +1430,9 @@ export async function enterStreet({ root, photos, place, lat, lng, onExit }) {
       if (d < nd) { nd = d; near = f.photo; }
     }
     const prompt = $('.st-prompt');
-    const doorDist = mode === 'street' ? Math.hypot(player.position.x - markerPos.x, player.position.z - markerPos.z) : Infinity;
+    const doorDist = mode === 'street' && CFG.door ? Math.hypot(player.position.x - markerPos.x, player.position.z - markerPos.z) : Infinity;
     if (near && !viewing && mode !== 'photo') { prompt.textContent = isTouch ? '📸 הקישו על התמונה להגדלה ולכניסה אליה' : '📸 E להגדלה · Q כדי להיכנס לתמונה'; prompt.hidden = false; }
-    else if (doorDist < 7 && !viewing) { prompt.textContent = '✨ היכנסו לעיגול המואר כדי להיכנס לאירוע'; prompt.hidden = false; }
+    else if (doorDist < 7 && !viewing) { prompt.textContent = `✨ היכנסו לעיגול המואר: ${CFG.door}`; prompt.hidden = false; }
     else prompt.hidden = true;
 
     // Third-person camera: eased toward where it wants to be, so collision moves never snap.
@@ -1297,7 +1474,7 @@ export async function enterStreet({ root, photos, place, lat, lng, onExit }) {
   }
   const perf = { t: 0, n: 0, logic: 0 };
 
-  function stop() {
+  function stop({ quiet = false } = {}) {
     if (!running) return;
     running = false;
     window.removeEventListener('keydown', onKey);
@@ -1313,16 +1490,16 @@ export async function enterStreet({ root, photos, place, lat, lng, onExit }) {
     for (const { video } of videoShared.values()) { video.pause(); video.removeAttribute('src'); video.load(); }
     renderer.dispose();
     root.innerHTML = '';
-    onExit?.();
+    if (!quiet) onExit?.();
   }
 
   camera.position.set(door.x + Math.sin(introAng0 + Math.PI * 0.9) * 34, 42, door.z + Math.cos(introAng0 + Math.PI * 0.9) * 34);
   lookAt.copy(door);
-  $('.st-title b').textContent = venue.name || place || '';
+  $('.st-title b').textContent = venue?.name || place || '';
   $('.st-title span').textContent = photos[0]?.date ? dateFmt.format(photos[0].date) : '';
   intro = 0.0001;
   root.classList.add('st-intro');
   $('.st-loading').classList.add('done');
   requestAnimationFrame(step);
-  return { stop, debug: { get logicMs() { return perf.logic; }, get pixelRatio() { return renderer.getPixelRatio(); }, player, camera, solids, venue, memories, standees, videoFrames, get mode() { return mode; }, markerPos, door, out } };
+  return { stop, type, debug: { get logicMs() { return perf.logic; }, get pixelRatio() { return renderer.getPixelRatio(); }, player, camera, solids, venue, memories, standees, videoFrames, get mode() { return mode; }, markerPos, door, out } };
 }

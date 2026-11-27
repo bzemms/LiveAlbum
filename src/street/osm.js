@@ -76,7 +76,7 @@ export function fromElements(elements, lat, lng) {
       roads.push({ pts, width: ROAD_WIDTH[tags.highway], foot: FOOT.has(tags.highway), name: tags.name || null });
     }
   }
-  return { buildings, roads, source: 'osm' };
+  return { buildings, roads, water: [], parks: [], sand: [], pois: [], source: 'osm' };
 }
 
 /** A believable block grid, used when the map service is unreachable or the area is unmapped. */
@@ -111,7 +111,7 @@ export function generated(seed = 7) {
       }
     }
   }
-  return { buildings, roads, source: 'generated' };
+  return { buildings, roads, water: [], parks: [], sand: [], pois: [], source: 'generated' };
 }
 
 export async function loadArea(lat, lng, radius = 230) {
@@ -119,7 +119,8 @@ export async function loadArea(lat, lng, radius = 230) {
   try {
     const { loadFromTiles } = await import('./tiles.js');
     const area = await loadFromTiles(lat, lng, radius);
-    if (area.buildings.length >= 3) return area;
+    // Any real map data counts: a beach or a forest has few buildings, and that is the point.
+    if (area.buildings.length || area.roads.length || area.water.length || area.parks.length || area.sand.length) return area;
   } catch {
     /* try the Overpass API next */
   }
@@ -127,9 +128,10 @@ export async function loadArea(lat, lng, radius = 230) {
   try {
     const els = await query(lat, lng, radius);
     const area = fromElements(els, lat, lng);
-    if (area.buildings.length >= 3) return area;
+    if (area.buildings.length || area.roads.length) return area;
   } catch {
     /* fall through to the generated neighbourhood */
   }
-  return generated(Math.round(Math.abs(lat * 1000 + lng * 1000)));
+  // Nothing loaded at all: an empty area, and the scene decides what to put there.
+  return { buildings: [], roads: [], water: [], parks: [], sand: [], pois: [], source: 'none' };
 }

@@ -292,3 +292,13 @@ body.in-street .panel, body.in-street .brand, body.in-street .credit, body.in-st
 .auth-sent { color: var(--gold) !important; }
 .auth-err { color: #ff9a8a; font-size: 0.85rem; margin: 0; }
 .timeline .empty-hint { color: var(--muted); font-size: 0.88rem; padding: 20px 6px; text-align: center; }
+
+/* Place type chip and menu */
+.st-place { display: flex; flex-direction: column; align-items: flex-end; gap: 2px; }
+.st-type { margin-top: 4px; font: inherit; font-size: 0.78rem; font-weight: 600; color: var(--gold); background: rgba(255, 214, 120, 0.12); border: 1px solid rgba(255, 214, 120, 0.4); border-radius: 999px; padding: 3px 10px; cursor: pointer; }
+.st-types {
+  position: absolute; left: calc(12px + env(safe-area-inset-left, 0px)); top: calc(110px + env(safe-area-inset-top, 0px));
+  display: flex; flex-direction: column; gap: 6px; background: rgba(10, 14, 22, 0.92); border: 1px solid var(--glass-line);
+  border-radius: 12px; padding: 10px; z-index: 6; min-width: 200px;
+}
+.st-types .st-btn { text-align: right; }

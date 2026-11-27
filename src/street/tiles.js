@@ -58,7 +58,7 @@ export async function loadFromTiles(lat, lng, radius = 230) {
   const proj = projector(lat, lng);
   const near = (pts) => pts.some(([x, z]) => Math.abs(x) < radius + 40 && Math.abs(z) < radius + 40);
   const toLocal = (ring) => ring.map(([lo, la]) => proj(la, lo));
-  const buildings = [], roads = [], water = [], parks = [], pois = [];
+  const buildings = [], roads = [], water = [], parks = [], sand = [], wild = [], pois = [];
   const seen = new Set();
 
   for (const { x, y, buf } of tiles) {
@@ -118,19 +118,21 @@ export async function loadFromTiles(lat, lng, radius = 230) {
       }
     });
     each('landcover', (f, gj) => {
-      if (!['grass', 'wood', 'farmland'].includes(f.properties.class)) return;
+      const cls = f.properties.class;
+      const into = cls === 'sand' || f.properties.subclass === 'beach' ? sand : ['grass', 'wood', 'farmland', 'wetland'].includes(cls) ? parks : ['rock', 'ice'].includes(cls) ? wild : null;
+      if (!into) return;
       for (const poly of polys(gj.geometry)) {
         const ring = toLocal(poly[0]);
-        if (ring.length > 3 && near(ring)) parks.push(ring);
+        if (ring.length > 3 && near(ring)) into.push(ring);
       }
     });
     each('poi', (f, gj) => {
-      const name = f.properties['name:he'] || f.properties.name;
-      if (!name || gj.geometry.type !== 'Point') return;
+      const name = f.properties['name:he'] || f.properties.name || '';
+      if (gj.geometry.type !== 'Point') return;
       const [lo, la] = gj.geometry.coordinates;
       const [px, pz] = proj(la, lo);
-      if (Math.abs(px) < radius && Math.abs(pz) < radius) pois.push({ x: px, z: pz, name });
+      if (Math.abs(px) < radius && Math.abs(pz) < radius) pois.push({ x: px, z: pz, name, cls: f.properties.class || '', sub: f.properties.subclass || '' });
     });
   }
-  return { buildings, roads, water, parks, pois, source: 'osm' };
+  return { buildings, roads, water, parks, sand, wild, pois, source: 'osm' };
 }
