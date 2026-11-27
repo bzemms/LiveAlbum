@@ -30,7 +30,11 @@ export function makeMinimap(canvas, { radius, buildings, roads, night }) {
   const ctx = canvas.getContext('2d');
   const dpr = Math.min(2, devicePixelRatio || 1);
 
-  return function draw({ x, z, yaw, route, memories, door, scale = 1.25 }) {
+  // What the last frame showed, so a tap on the map can be turned back into a place in the world.
+  let view = null;
+  const hits = [];
+
+  function draw({ x, z, yaw, route, memories, door, scale = 1.25 }) {
     const W = canvas.clientWidth;
     if (canvas.width !== W * dpr) { canvas.width = canvas.height = W * dpr; }
     const c = canvas.width / 2;
@@ -44,6 +48,8 @@ export function makeMinimap(canvas, { radius, buildings, roads, night }) {
     ctx.fillRect(0, 0, canvas.width, canvas.height);
     // World → radar: centre on the visitor, turn so the camera's forward points up.
     const k = scale * dpr;
+    view = { x, z, yaw, k, c };
+    hits.length = 0;
     ctx.translate(c, c);
     ctx.rotate(yaw);
     ctx.scale(k, k);
@@ -63,6 +69,9 @@ export function makeMinimap(canvas, { radius, buildings, roads, night }) {
       // Keep off-radar targets pinned to the rim so they stay findable.
       const lim = (c - 10 * dpr) / k, d = Math.hypot(px, pz);
       if (d > lim) { px *= lim / d; pz *= lim / d; }
+      // Where the icon lands on the canvas, so tapping it jumps to the real spot even when pinned.
+      const cs = Math.cos(yaw), sn = Math.sin(yaw);
+      hits.push({ x: wx, z: wz, cx: c + (px * cs - pz * sn) * k, cy: c + (px * sn + pz * cs) * k });
       ctx.save();
       ctx.translate(px, pz);
       ctx.rotate(-yaw);
@@ -98,5 +107,20 @@ export function makeMinimap(canvas, { radius, buildings, roads, night }) {
     ctx.beginPath();
     ctx.arc(c, c, c - 2 * dpr, 0, Math.PI * 2);
     ctx.stroke();
+  }
+
+  /** The world point under a tap at (clientX, clientY): a star or the door if one is close, else the ground. */
+  draw.pick = (clientX, clientY) => {
+    if (!view) return null;
+    const r = canvas.getBoundingClientRect();
+    const cx = ((clientX - r.left) / r.width) * canvas.width, cy = ((clientY - r.top) / r.height) * canvas.height;
+    if (Math.hypot(cx - view.c, cy - view.c) > view.c) return null;
+    let best = null, bd = 16 * dpr;
+    for (const h of hits) { const d = Math.hypot(h.cx - cx, h.cy - cy); if (d < bd) { bd = d; best = h; } }
+    if (best) return { x: best.x, z: best.z, icon: true };
+    const dx = (cx - view.c) / view.k, dy = (cy - view.c) / view.k;
+    const cs = Math.cos(view.yaw), sn = Math.sin(view.yaw);
+    return { x: view.x + (dx * cs + dy * sn) / PX, z: view.z + (-dx * sn + dy * cs) / PX };
   };
+  return draw;
 }
