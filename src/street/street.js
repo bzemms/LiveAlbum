@@ -8,14 +8,16 @@ import { makeGrid } from './navgrid.js';
 import { makeMinimap } from './minimap.js';
 import { peopleFrom } from './figures.js';
 import { depthOf } from './depth.js';
+import { buildCity } from './buildings.js';
+import { dressStreet } from './dressing.js';
 
 const DAY = {
-  sky: 0xa9d3f0, fog: 0xc9e2f2, ground: 0xd8d2c4, road: 0x55595f, foot: 0xc2bba9,
+  sky: 0xa9d3f0, fog: 0xc9e2f2, ground: 0xd8d2c4, road: 0x55595f, foot: 0xc9bea6, walk: 0xc4c2bd, curb: 0xe9e7e1,
   hemiSky: 0xffffff, hemiGround: 0xb9a98a, hemi: 1.1, sun: 0xfff1d6, sunI: 2.2,
   walls: ['#efe3cf', '#e6d2b5', '#d9dfe2', '#ecc9b8', '#c9d6e6', '#f3ead9', '#dcbfae', '#e9dcc4'],
 };
 const NIGHT = {
-  sky: 0x1c2b57, fog: 0x2a3863, ground: 0x7a7884, road: 0x3a3d46, foot: 0x8a8690,
+  sky: 0x1c2b57, fog: 0x2a3863, ground: 0x7a7884, road: 0x3a3d46, foot: 0x8a8690, walk: 0x8b8994, curb: 0xa3a1aa,
   hemiSky: 0x9fb0e8, hemiGround: 0x4a4250, hemi: 1.35, sun: 0xc4d0ff, sunI: 0.9,
   walls: ['#c9bfb4', '#bdb3c4', '#aab7c6', '#cdb8b4', '#a9b6cc', '#d2c8cf', '#c3b2ad', '#b9bccf'],
 };
@@ -283,37 +285,7 @@ export async function enterStreet({ root, photos, place, lat, lng, onExit }) {
     }
   }
 
-  // Roads: ribbons with round joints, merged into two meshes.
-  const roadGeo = { car: [], foot: [] };
-  for (const r of area.roads) {
-    const y = r.foot ? 0.03 : 0.02;
-    const list = r.foot ? roadGeo.foot : roadGeo.car;
-    for (let i = 0; i < r.pts.length - 1; i++) {
-      const [ax, az] = r.pts[i], [bx, bz] = r.pts[i + 1];
-      const len = Math.hypot(bx - ax, bz - az);
-      if (len < 0.1) continue;
-      const seg = new THREE.PlaneGeometry(len, r.width);
-      seg.rotateX(-Math.PI / 2);
-      seg.rotateY(-Math.atan2(bz - az, bx - ax));
-      seg.translate((ax + bx) / 2, y, (az + bz) / 2);
-      seg.deleteAttribute('uv');
-      list.push(seg);
-    }
-    for (const [x, z] of r.pts) {
-      const d = new THREE.CircleGeometry(r.width / 2, 12);
-      d.rotateX(-Math.PI / 2);
-      d.translate(x, y, z);
-      d.deleteAttribute('uv');
-      list.push(d);
-    }
-  }
-  for (const [k, color] of [['car', T.road], ['foot', T.foot]]) {
-    if (!roadGeo[k].length) continue;
-    const m = new THREE.Mesh(mergeGeometries(roadGeo[k]), new THREE.MeshLambertMaterial({ color }));
-    m.receiveShadow = true;
-    street.add(m);
-    roadGeo[k].forEach((g) => g.dispose());
-  }
+  // Roads, sidewalks and cars are laid out further down (dressing.js), once the photo spots are known.
 
   // Buildings: extruded footprints, coloured per building, merged into one mesh.
   const solids = area.buildings.map((b) => ({ ...b, box: bbox(b.pts) }));
@@ -380,37 +352,7 @@ export async function enterStreet({ root, photos, place, lat, lng, onExit }) {
   // A named place inside the venue (from the map's points of interest) names the venue.
   if (!venue.name) venue.name = (area.pois || []).find((p) => inPoly(p.x, p.z, venue.pts))?.name || null;
 
-  const bGeos = [];
-  const col = new THREE.Color();
-  solids.forEach((b) => {
-    const shape = new THREE.Shape(b.pts.map(([x, z]) => new THREE.Vector2(x, -z)));
-    let geo;
-    try {
-      geo = new THREE.ExtrudeGeometry(shape, { depth: b.h, bevelEnabled: false });
-    } catch {
-      return;
-    }
-    geo.rotateX(-Math.PI / 2);
-    geo.deleteAttribute('uv');
-    const n = geo.attributes.position.count;
-    const colors = new Float32Array(n * 3);
-    col.set(b === venue ? (night ? '#b49a6e' : '#f2d9a6') : T.walls[(b.id >>> 0) % T.walls.length]);
-    const roof = col.clone().multiplyScalar(0.82);
-    const normals = geo.attributes.normal;
-    for (let v = 0; v < n; v++) {
-      const c = normals.getY(v) > 0.5 ? roof : col;
-      colors.set([c.r, c.g, c.b], v * 3);
-    }
-    geo.setAttribute('color', new THREE.BufferAttribute(colors, 3));
-    bGeos.push(geo.index ? geo.toNonIndexed() : geo);
-  });
-  if (bGeos.length) {
-    const city = new THREE.Mesh(mergeGeometries(bGeos), new THREE.MeshLambertMaterial({ vertexColors: true, flatShading: true }));
-    city.castShadow = true;
-    city.receiveShadow = true;
-    street.add(city);
-    bGeos.forEach((g) => g.dispose());
-  }
+  buildCity(street, { solids, venue, walls: T.walls, night, shadows: renderer.shadowMap.enabled });
 
   // Door on the venue wall facing the street, and the outward direction from it.
   let doorAt = closestOnPoly(focus[0], focus[1], venue.pts);
@@ -590,7 +532,7 @@ export async function enterStreet({ root, photos, place, lat, lng, onExit }) {
         const px = x + nx * side, pz = z + nz * side;
         if (Math.hypot(px, pz) > R || blocked(px, pz) || Math.hypot(px - door.x, pz - door.z) < 9) continue;
         if (treeSpots.length < 400) treeSpots.push([px, pz]);
-        if (night && s % 26 < 13 && lampSpots.length < 200) lampSpots.push([x - nx * side, z - nz * side]);
+        if (s % 26 < 13 && lampSpots.length < 200) lampSpots.push([x - nx * side, z - nz * side]);
       }
     }
   }
@@ -608,12 +550,28 @@ export async function enterStreet({ root, photos, place, lat, lng, onExit }) {
   };
   instanced(new THREE.CylinderGeometry(0.12, 0.16, 2.2, 6), new THREE.MeshLambertMaterial({ color: 0x6b4a2f }), treeSpots, 1.1, 0.4);
   instanced(new THREE.IcosahedronGeometry(1.5, 0), new THREE.MeshLambertMaterial({ color: night ? 0x2f5a3a : 0x6aa84f, flatShading: true }), treeSpots, 3.1, 0.4);
-  instanced(new THREE.CylinderGeometry(0.06, 0.08, 5, 6), new THREE.MeshLambertMaterial({ color: 0x30343b }), lampSpots, 2.5);
-  instanced(new THREE.SphereGeometry(0.28, 10, 8), new THREE.MeshBasicMaterial({ color: 0xffe2a8 }), lampSpots, 5.1);
+  // Tree pits: a dark square of soil around each trunk.
+  const pit = new THREE.PlaneGeometry(1.3, 1.3);
+  pit.rotateX(-Math.PI / 2);
+  instanced(pit, new THREE.MeshLambertMaterial({ color: night ? 0x3a3330 : 0x6b5a48, polygonOffset: true, polygonOffsetFactor: -5, polygonOffsetUnits: -10 }), treeSpots, 0.03);
+  instanced(new THREE.CylinderGeometry(0.06, 0.09, 5, 6), new THREE.MeshLambertMaterial({ color: 0x30343b }), lampSpots, 2.5);
+  instanced(new THREE.SphereGeometry(0.28, 10, 8), night ? new THREE.MeshBasicMaterial({ color: 0xffe2a8 }) : new THREE.MeshLambertMaterial({ color: 0xf4f1e6, emissive: 0x333028 }), lampSpots, 5.1);
+
+  // Sidewalks, asphalt, markings, parked and passing cars, benches.
+  const dressing = dressStreet(street, {
+    roads: area.roads, R, T, night, shadows: renderer.shadowMap.enabled, trees: [...treeSpots, ...lampSpots],
+    blocked: (x, z, r) => solidNear(x, z, r),
+    avoid: [
+      { x: door.x, z: door.z, r: 10 },
+      { x: markerPos.x, z: markerPos.z, r: 4 },
+      { x: focus[0], z: focus[1], r: 7 },
+      ...memories.map((m) => ({ x: m.x, z: m.z, r: 3 })),
+    ],
+  });
 
   // Collision: building footprints (2D) with a small body radius.
   const BODY = 0.35;
-  const blockedAt = (x, z) => solidNear(x, z, BODY);
+  const blockedAt = (x, z) => solidNear(x, z, BODY) || dressing.carAt(x, z, BODY) || dressing.furnitureAt(x, z, BODY);
 
   // ----- Hall scene -----
   const hall = new THREE.Scene();
@@ -738,7 +696,7 @@ export async function enterStreet({ root, photos, place, lat, lng, onExit }) {
   street.add(player);
 
   // Walkable grid for the route, the chevrons that draw it on the street, and the radar.
-  const grid = makeGrid(R, 2.5, (x, z) => !clearAt(x, z, 0.9));
+  const grid = makeGrid(R, 2.5, (x, z) => !clearAt(x, z, 0.9) || dressing.carAt(x, z, 0));
   const chevShape = new THREE.Shape([new THREE.Vector2(-0.55, -0.3), new THREE.Vector2(0, 0.35), new THREE.Vector2(0.55, -0.3), new THREE.Vector2(0.55, -0.05), new THREE.Vector2(0, 0.6), new THREE.Vector2(-0.55, -0.05)].map((v) => v));
   const chevGeo = new THREE.ShapeGeometry(chevShape);
   chevGeo.rotateX(-Math.PI / 2);
@@ -805,7 +763,7 @@ export async function enterStreet({ root, photos, place, lat, lng, onExit }) {
     const outSpots = [];
     for (const [f, t] of [[1.6, -1.7], [1.6, 1.7], [2.6, -2.9], [2.6, 2.9], [3.4, 0.9], [3.4, -0.9], [1.0, -3.2], [1.0, 3.2]]) {
       const x = m.x + fx * f + tx * t, z = m.z + fz * f + tz * t;
-      if (clearAt(x, z, 0.5)) outSpots.push([x, z]);
+      if (clearAt(x, z, 0.5) && !dressing.carAt(x, z, 0.5)) outSpots.push([x, z]);
     }
     return outSpots;
   };
@@ -1177,6 +1135,7 @@ export async function enterStreet({ root, photos, place, lat, lng, onExit }) {
       }
     } else vel.set(0, 0);
     animateCharacter(player, speed, dt);
+    if (mode === 'street') dressing.update(dt, player.position);
     // Play the three nearest video frames in view range; pause the rest to spare the device.
     if (videoFrames.length && now - (step.vidAt || 0) > 500) {
       step.vidAt = now;
@@ -1324,5 +1283,5 @@ export async function enterStreet({ root, photos, place, lat, lng, onExit }) {
   root.classList.add('st-intro');
   $('.st-loading').classList.add('done');
   requestAnimationFrame(step);
-  return { stop, debug: { get logicMs() { return perf.logic; }, get pixelRatio() { return renderer.getPixelRatio(); }, player, camera, solids, venue, memories, standees, videoFrames, get mode() { return mode; }, markerPos, door, out } };
+  return { stop, debug: { get logicMs() { return perf.logic; }, get pixelRatio() { return renderer.getPixelRatio(); }, player, camera, solids, dressing, venue, memories, standees, videoFrames, get mode() { return mode; }, markerPos, door, out } };
 }
