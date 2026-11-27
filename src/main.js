@@ -220,12 +220,25 @@ $('v-close').addEventListener('click', () => { stopTour(); close(); });
 // ---------- Down to the street ----------
 // The globe is how you travel; the place itself is a 3D street you walk through.
 let streetSession = null;
-async function goStreet(photo, { again = false } = {}) {
+// The album's places in time order: one per spot, starting with its earliest photo.
+function placesInOrder() {
+  const seen = new Map();
+  for (const p of state.photos) if (p.lat != null && !seen.has(keyOf(p))) seen.set(keyOf(p), p);
+  return [...seen.values()];
+}
+async function goStreet(photo, { again = false, startAt = null } = {}) {
   if ((streetSession && !again) || photo?.lat == null) return;
   stopTour();
   close();
   stopSpin();
   const group = state.photos.filter((p) => p.lat != null && keyOf(p) === keyOf(photo));
+  const order = placesInOrder();
+  const at = order.findIndex((p) => keyOf(p) === keyOf(photo));
+  const labelOf = (p) => (p ? `${p.place || 'המקום'}` : null);
+  const neighbors = {
+    next: order[at + 1] ? { label: labelOf(order[at + 1]) } : null,
+    prev: order[at - 1] ? { label: labelOf(order[at - 1]) } : null,
+  };
   const modP = import('./street/street.js');
   const typesP = import('./street/placetype.js');
   if (!again) {
@@ -247,10 +260,26 @@ async function goStreet(photo, { again = false } = {}) {
     lng: photo.lng,
     // The kind of place: the visitor's earlier choice for this spot, else detected on the way in.
     type: types.savedType(photo.lat, photo.lng),
+    neighbors,
+    startAt,
+    // "Next" past the last photo: back up over the globe, fly to the next place and go down there.
+    onPlace: async (dir) => {
+      const target = order[at + dir];
+      streetSession = null;
+      $('street').hidden = true;
+      document.body.classList.remove('in-street');
+      globe.resumeAnimation();
+      globe.pointOfView({ lat: photo.lat, lng: photo.lng, altitude: 0.05 });
+      $('dive').classList.add('out');
+      setTimeout(() => { $('dive').hidden = true; $('dive').classList.remove('out'); }, 700);
+      globe.pointOfView({ lat: (photo.lat + target.lat) / 2, lng: (photo.lng + target.lng) / 2, altitude: 1.3 }, 1300);
+      await sleep(1300);
+      goStreet(target, { startAt: dir > 0 ? 'first' : 'last' });
+    },
     onTypeChange: (t) => {
       types.saveType(photo.lat, photo.lng, t);
       streetSession = null;
-      goStreet(photo, { again: true });
+      goStreet(photo, { again: true, startAt });
     },
     onExit: () => {
       streetSession = null;

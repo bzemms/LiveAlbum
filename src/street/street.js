@@ -226,7 +226,7 @@ function makeStandee(fig) {
 }
 
 // ---------- Main ----------
-export async function enterStreet({ root, photos, place, lat, lng, onExit, type: wantType = null, onTypeChange = null }) {
+export async function enterStreet({ root, photos, place, lat, lng, onExit, type: wantType = null, onTypeChange = null, neighbors = {}, onPlace = null, startAt = null }) {
   const night = photos.filter((p) => p.date && (p.date.getHours() >= 18 || p.date.getHours() < 6)).length > photos.length / 2;
   let T = night ? NIGHT : DAY;
 
@@ -243,8 +243,9 @@ export async function enterStreet({ root, photos, place, lat, lng, onExit, type:
     <div class="st-status" hidden></div>
     <div class="st-title"><b></b><span></span></div>
     <div class="st-help">${isTouch ? 'ג׳ויסטיק להליכה · גרירה לסיבוב המצלמה · הקשה על תמונה להגדלה · הקשה על המפה להגדלה' : 'WASD או חצים להליכה · Shift לריצה · גרירה לסיבוב · E או לחיצה על תמונה להגדלה · M או לחיצה על המפה להגדלה'}</div>
+    <div class="st-album"><button class="st-btn" data-act="prev" type="button">‹ הקודם</button><span class="st-album-count"></span><button class="st-btn gold" data-act="next" type="button">הבא ›</button></div>
     <div class="st-joy" ${isTouch ? '' : 'hidden'}><div class="st-knob"></div></div>
-    <div class="st-photo" hidden><figure><img alt=""><video controls playsinline hidden></video><figcaption><b></b><span></span></figcaption></figure><div class="st-photo-actions"><button class="st-btn gold" data-act="enter-photo">🔮 היכנסו לתמונה</button><button class="st-btn" data-act="close-photo">✕ סגור</button></div></div>
+    <div class="st-photo" hidden><figure><img alt=""><video controls playsinline hidden></video><figcaption><b></b><span></span></figcaption></figure><div class="st-photo-actions"><button class="st-btn" data-act="prev" type="button">‹</button><button class="st-btn" data-act="enter-photo">🔮 היכנסו לתמונה</button><button class="st-btn" data-act="close-photo">✕ סגור</button><button class="st-btn gold st-next-photo" data-act="next" type="button">הבא ›</button></div></div>
     <div class="st-loading"><div class="st-spinner"></div><div>יורדים לרחוב…</div></div>`;
   const $ = (s) => root.querySelector(s);
   $('.st-place b').textContent = place || 'המקום';
@@ -798,7 +799,12 @@ export async function enterStreet({ root, photos, place, lat, lng, onExit, type:
   };
   addRow(inside === 'event' ? 2.05 : 1.75);
   if (photos.length > slots.length && HH > 4.5) addRow(4.0);
+  const hallStops = [];
   photos.slice(0, slots.length).forEach((p, i) => {
+    {
+      const nrm = new THREE.Vector3(0, 0, 1).applyAxisAngle(new THREE.Vector3(0, 1, 0), slots[i].rot);
+      hallStops.push({ scene: 'hall', photo: p, fx: slots[i].pos[0], fz: slots[i].pos[2], nx: nrm.x, nz: nrm.z });
+    }
     const big = inside === 'event' && photos.length <= 14;
     const { group, pick, video } = photoFrame(p, big ? 2.2 : 1.6, { posts: false, loader, videoFor, maxH: big ? 2.2 : 1.4 });
     if (video) videoFrames.push({ video, group });
@@ -1014,6 +1020,8 @@ export async function enterStreet({ root, photos, place, lat, lng, onExit, type:
       if (e.code === 'KeyM' && mode === 'street') { setMapBig(!mapBig); return; }
       if (e.code === 'KeyE' && near) { openPhoto(near); return; }
       if (e.code === 'KeyQ' && near && mode !== 'photo') { enterPhoto(near); return; }
+      if (e.code === 'Space' || e.code === 'PageDown') { e.preventDefault(); albumStep(1); return; }
+      if (e.code === 'Backspace' || e.code === 'PageUp') { e.preventDefault(); albumStep(-1); return; }
       keys.add(e.code);
     } else keys.delete(e.code);
   };
@@ -1029,6 +1037,7 @@ export async function enterStreet({ root, photos, place, lat, lng, onExit, type:
   });
   canvas.addEventListener('pointermove', (e) => {
     if (!drag || drag.id !== e.pointerId) return;
+    yawGoal = null;
     yaw -= (e.clientX - drag.x) * 0.006;
     pitch = Math.max(0.05, Math.min(1.1, pitch + (e.clientY - drag.y) * 0.004));
     drag.x = e.clientX; drag.y = e.clientY;
@@ -1213,9 +1222,14 @@ export async function enterStreet({ root, photos, place, lat, lng, onExit, type:
       $('[data-act="exit"]').hidden = false;
     });
   }
-  root.addEventListener('click', (e) => {
+  // The root element outlives each scene (a new place or type reuses it), so this listener is
+  // removed in stop(); otherwise an old scene's buttons would keep firing.
+  const onRootClick = (e) => {
+    if (!running) return;
     const act = e.target.closest('[data-act]')?.dataset.act;
     if (act === 'close-photo') closePhoto();
+    if (act === 'next') albumStep(1);
+    if (act === 'prev') albumStep(-1);
     if (act === 'type') {
       const menu = $('.st-types');
       if (!menu.hidden) { menu.hidden = true; return; }
@@ -1238,10 +1252,91 @@ export async function enterStreet({ root, photos, place, lat, lng, onExit, type:
     if (act === 'enter-photo' && viewing) enterPhoto(viewing);
     if (act === 'leave-photo') leavePhoto();
     if (act === 'exit') stop();
-  });
+  };
+  root.addEventListener('click', onRootClick);
   $('.st-photo').addEventListener('click', (e) => { if (e.target === $('.st-photo')) closePhoto(); });
 
   setTimeout(() => populate(), 1200);
+
+  // ----- Album mode: "next" walks you to each photo in turn, then on to the next place -----
+  // Street photos first (in date order), then, behind a door, the wall photos not already seen.
+  const stops = [];
+  const standFrom = (fx, fz, nx, nz, ok, dists) => {
+    for (const d of dists) for (const side of [0, 0.8, -0.8, 1.6, -1.6]) {
+      const x = fx + nx * d - nz * side, z = fz + nz * d + nx * side;
+      if (ok(x, z)) return [x, z];
+    }
+    return [fx + nx * dists[0], fz + nz * dists[0]];
+  };
+  for (const m of memories) {
+    const nx = Math.sin(m.rot), nz = Math.cos(m.rot);
+    const [sx, sz] = standFrom(m.x, m.z, nx, nz, (x, z) => !blockedAt(x, z), [3.2, 2.6, 4, 4.8]);
+    stops.push({ scene: 'street', photo: m.photo, fx: m.x, fz: m.z, sx, sz });
+  }
+  if (CFG.door) {
+    const seen = new Set(memories.map((m) => m.photo));
+    for (const h of hallStops) {
+      if (seen.has(h.photo)) continue;
+      const [sx, sz] = standFrom(h.fx, h.fz, h.nx, h.nz, (x, z) => !hallBlocked(x, z), [2.6, 2.1, 3.2, 3.8]);
+      stops.push({ ...h, sx, sz });
+    }
+  }
+  let stopIdx = -1;
+  let auto = null; // { pts, i, done } while walking to a photo by itself
+  let yawGoal = null;
+  const updateAlbum = () => {
+    $('.st-album-count').textContent = stops.length ? `${Math.max(0, stopIdx + 1)} / ${stops.length}` : '';
+    const last = stopIdx >= stops.length - 1;
+    const label = !last ? 'הבא ›' : neighbors.next ? `${neighbors.next.label} ›` : 'סוף האלבום';
+    root.querySelectorAll('[data-act="next"]').forEach((b) => { b.textContent = label; b.disabled = last && !neighbors.next; });
+    root.querySelectorAll('[data-act="prev"]').forEach((b) => { b.disabled = stopIdx <= 0 && !neighbors.prev; });
+  };
+  function arriveAt(st) {
+    auto = null;
+    vel.set(0, 0);
+    yawGoal = Math.atan2(player.position.x - st.fx, player.position.z - st.fz);
+    player.rotation.y = yawGoal + Math.PI;
+    const i = stopIdx;
+    setTimeout(() => { if (running && stopIdx === i && !viewing) openPhoto(st.photo); }, 550);
+  }
+  function goToStop(i) {
+    const st = stops[i];
+    if (!st) return;
+    stopIdx = i;
+    updateAlbum();
+    closePhoto();
+    const place = () => {
+      if (st.scene === 'hall' && mode !== 'hall') goHall();
+      if (st.scene === 'street' && mode !== 'street') goStreet();
+      player.position.set(st.sx, 0, st.sz);
+      yaw = Math.atan2(st.sx - st.fx, st.sz - st.fz);
+    };
+    const jump = () => { fadeSwap(place); setTimeout(() => { if (stopIdx === i) arriveAt(st); }, 700); };
+    if (mode === 'photo') { leavePhoto(); setTimeout(() => goToStop(i), 800); return; }
+    if (st.scene !== mode) return jump();
+    const d = Math.hypot(st.sx - player.position.x, st.sz - player.position.z);
+    if (d < 0.6) return arriveAt(st);
+    let pts = mode === 'street' ? grid.path(player.position.x, player.position.z, st.sx, st.sz) : [[player.position.x, player.position.z], [st.sx, st.sz]];
+    if (pts) pts = [[player.position.x, player.position.z], ...pts.slice(1), [st.sx, st.sz]];
+    const len = pts ? pts.reduce((s2, p, k) => (k ? s2 + Math.hypot(p[0] - pts[k - 1][0], p[1] - pts[k - 1][1]) : 0), 0) : Infinity;
+    if (!pts || len > 36) return jump(); // far away: a quick fade instead of a long walk (≤ 4 s)
+    auto = { pts, i: 1, st };
+  }
+  function albumStep(dir) {
+    if (intro < 1) { introSpeed = 3.5; return; }
+    const n = stopIdx + dir;
+    if (n >= 0 && n < stops.length) return goToStop(n);
+    const nb = dir > 0 ? neighbors.next : neighbors.prev;
+    if (nb && onPlace) {
+      closePhoto();
+      showToast(`✈️ ממשיכים: ${nb.label}`, 2000);
+      setTimeout(() => { stop({ quiet: true }); onPlace(dir); }, 900);
+    } else if (dir > 0) {
+      closePhoto();
+      showToast('🎉 זה סוף האלבום', 3000);
+    }
+  }
+  updateAlbum();
 
   // ----- Loop -----
   const resize = () => {
@@ -1321,6 +1416,32 @@ export async function enterStreet({ root, photos, place, lat, lng, onExit, type:
       if (jm > 0.12) { const k = Math.pow((jm - 0.12) / 0.88, 1.3) / jm; ix += joy.x * k; iz += joy.y * k; }
     }
     if (intro < 1 || fading) ix = iz = 0;
+    if (auto && Math.hypot(ix, iz) > 0.05) auto = null; // walking yourself takes over
+    if (auto) {
+      // Walk the path at a steady pace; the camera swings round behind.
+      const [tx, tz] = auto.pts[auto.i];
+      let dx = tx - player.position.x, dz = tz - player.position.z;
+      const dd = Math.hypot(dx, dz), sp = 9;
+      if (dd < sp * dt + 0.05) {
+        player.position.set(tx, 0, tz);
+        if (++auto.i >= auto.pts.length) arriveAt(auto.st);
+      } else {
+        dx /= dd; dz /= dd;
+        vel.set(dx * sp, dz * sp);
+        player.position.x += dx * sp * dt;
+        player.position.z += dz * sp * dt;
+        let rd = Math.atan2(dx, dz) - player.rotation.y;
+        rd = Math.atan2(Math.sin(rd), Math.cos(rd));
+        player.rotation.y += rd * (1 - Math.exp(-dt * 10));
+        yawGoal = Math.atan2(-dx, -dz);
+      }
+    }
+    if (yawGoal != null) {
+      let yd = yawGoal - yaw;
+      yd = Math.atan2(Math.sin(yd), Math.cos(yd));
+      yaw += yd * (1 - Math.exp(-dt * 3.5));
+      if (!auto && Math.abs(yd) < 0.01) yawGoal = null;
+    }
     const mag = Math.min(1, Math.hypot(ix, iz));
     const run = keys.has('ShiftLeft') || keys.has('ShiftRight') || Math.hypot(joy.x, joy.y) > 0.92;
     // Desired velocity on the ground, reached with a short acceleration so starts and stops ease.
@@ -1333,10 +1454,9 @@ export async function enterStreet({ root, photos, place, lat, lng, onExit, type:
       wz = ((rz * ix - fz * iz) / Math.hypot(ix, iz)) * top;
     }
     const acc = 1 - Math.exp(-dt * (mag > 0.02 ? 9 : 12));
-    vel.x += (wx - vel.x) * acc;
-    vel.y += (wz - vel.y) * acc;
+    if (!auto) { vel.x += (wx - vel.x) * acc; vel.y += (wz - vel.y) * acc; }
     const speed = Math.hypot(vel.x, vel.y);
-    if (speed > 0.03) {
+    if (auto) { /* moved above */ } else if (speed > 0.03) {
       const nx = player.position.x + vel.x * dt, nz = player.position.z + vel.y * dt;
       const hit = mode === 'street' ? blockedAt : mode === 'hall' ? hallBlocked : photoBlocked;
       if (!hit(nx, nz)) player.position.set(nx, 0, nz);
@@ -1447,7 +1567,11 @@ export async function enterStreet({ root, photos, place, lat, lng, onExit, type:
       camera.position.lerpVectors(orbit, camPos, e * e);
       lookAt.lerpVectors(door, headNow, e);
       $('.st-title').style.opacity = String(Math.max(0, Math.min(1, (0.85 - intro) * 4)));
-      if (intro >= 1) { $('.st-title').hidden = true; root.classList.remove('st-intro'); }
+      if (intro >= 1) {
+        $('.st-title').hidden = true;
+        root.classList.remove('st-intro');
+        if (startAt && stops.length) goToStop(startAt === 'last' ? stops.length - 1 : 0);
+      }
     } else {
       camera.position.lerp(camPos, 1 - Math.exp(-dt * 7));
       lookAt.lerp(headNow, 1 - Math.exp(-dt * 14));
@@ -1476,6 +1600,7 @@ export async function enterStreet({ root, photos, place, lat, lng, onExit, type:
   function stop({ quiet = false } = {}) {
     if (!running) return;
     running = false;
+    root.removeEventListener('click', onRootClick);
     window.removeEventListener('keydown', onKey);
     window.removeEventListener('keyup', onKey);
     window.removeEventListener('resize', resize);

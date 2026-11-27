@@ -36,6 +36,7 @@ export function makeMinimap(canvas, { radius, buildings, roads, night }) {
 
   function draw({ x, z, yaw, route, memories, door, scale = 1.25 }) {
     const W = canvas.clientWidth;
+    if (W < 8) return; // hidden (e.g. indoors): nothing to draw
     if (canvas.width !== W * dpr) { canvas.width = canvas.height = W * dpr; }
     const c = canvas.width / 2;
     ctx.setTransform(1, 0, 0, 1, 0, 0);
